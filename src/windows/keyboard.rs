@@ -1,7 +1,7 @@
 // #[path = "./common.rs"]
 use crate::windows::common::*;
 
-pub const HOTKEY:u64 = 65;
+pub const HOTKEY:u32 = 65;
 
 lazy_static! {
     pub static ref KEYBOARD_EVENT_CHANNEL: (Mutex<Sender<KBDLLHOOKSTRUCT>>, Mutex<Receiver<KBDLLHOOKSTRUCT>>) = {
@@ -50,14 +50,14 @@ pub unsafe extern "system" fn keyboard_hook_callback(code: i32, wParam: WPARAM, 
         .expect("Failed to unlock Mutex")
         .send(keyboard_event_struct)
         .expect("Receiving end of KEYBOARD_EVENT_CHANNEL was closed");
-    // if keyboard_event_struct.vkCode == HOTKEY{
-    //     TERMINATEPROGRAM
-    //     .0
-    //     .lock()
-    //     .expect("Failed to unlock Mutex")
-    //     .send(true)
-    //     .expect("Receiving end of KEYBOARD_EVENT_CHANNEL was closed");
-    // }
+    if keyboard_event_struct.vkCode == HOTKEY{
+        TERMINATEPROGRAM
+        .0
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .send(true)
+        .expect("Receiving end of TERMINATEPROGRAM was closed");
+    }
     if *BLOCK_KEYBOARD {
         return 1
     }else {
