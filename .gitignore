@@ -5,6 +5,11 @@ test2.py
 test3.py
 test4.py
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+=======
+/src/main1.rs
+>>>>>>> 29865b1eef984b3d71948d76e991d94f9621ca00
 Cargo.lock
 =======
 Cargo.lock

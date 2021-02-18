@@ -1,299 +1,340 @@
-use lazy_static::lazy_static;
-use rdev::{listen, Event,EventType,simulate,SimulateError};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Mutex;
-use std::thread;
-// #[path = "/windows/keyboard.rs"]
-// use crate::keyboard::*;
+use libp2p::{
+    core::upgrade,
+    floodsub::{Floodsub, FloodsubEvent, Topic},
+    identity,
+    mdns::{MdnsEvent, TokioMdns},
+    mplex,
+    noise::{Keypair, NoiseConfig, X25519Spec},
+    swarm::{NetworkBehaviourEventProcess, Swarm, SwarmBuilder},
+    tcp::TokioTcpConfig,
+    NetworkBehaviour, PeerId, Transport,
+};
+use log::{error, info};
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use tokio::{fs, io::AsyncBufReadExt, sync::mpsc};
+
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
+
+static KEYS: Lazy<identity::Keypair> = Lazy::new(|| identity::Keypair::generate_ed25519());
+static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
+static TOPIC: Lazy<Topic> = Lazy::new(|| Topic::new("Capstone"));
+
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 pub use crate::windows::*;
 
-#[cfg(target_os = "windows")]
-fn main(){
-    
-    thread::spawn(move || {
-        receive_keyboard_event(); 
-    });
-    receive_mouse_event();
+#[derive(Debug, Serialize, Deserialize)]
+struct Message {
+    header: String,
+    data: String,
+    receiver: Vec<String>,
 }
 
-#[cfg(target_os = "linux")]
-fn main(){
-    println!("LINUX BABY!");
+#[derive(Debug)]
+enum EventType {
+    Response(Message),
+    Input(String),
 }
 
-// fn main(){
-//     println!("No clue wgar ur running bro");
-// }
+#[derive(Debug, Serialize, Deserialize)]
+struct KeyboardEvent {
+    vkCode: u32,
+    scanCode: u32,
+    flags: u32,
+}
 
-// lazy_static! {
-//     static ref EVENT_CHANNEL: (Mutex<Sender<Event>>, Mutex<Receiver<Event>>) = {
-//         let (send, recv) = channel();
-//         (Mutex::new(send), Mutex::new(recv))
-//     };
-// }
 
-// fn send_event(event: Event) {
-//     EVENT_CHANNEL
-//         .0
-//         .lock()
-//         .expect("Failed to unlock Mutex")
-//         .send(event)
-//         .expect("Receiving end of EVENT_CHANNEL was closed");
-// }
+#[derive(NetworkBehaviour)]
+struct RecipeBehaviour {
+    floodsub: Floodsub,
+    mdns: TokioMdns,
+    #[behaviour(ignore)]
+    response_sender: mpsc::UnboundedSender<Message>,
+}
 
-// fn main2() {
-//     println!("main2");
-//     // spawn new thread because listen blocks
-//     let _listener = thread::spawn(move || {
-//         listen(send_event).expect("Could not listen");
-//     });
+impl NetworkBehaviourEventProcess<FloodsubEvent> for RecipeBehaviour {
+    fn inject_event(&mut self, event: FloodsubEvent) {
+        match event {
+            FloodsubEvent::Message(msg) => {
+                if let Ok(resp) = serde_json::from_slice::<Message>(&msg.data) {
+                    if resp.receiver.contains(&PEER_ID.to_string()){
+                        if resp.header == "Test".to_string() {
+                            println!("perfect. Data: {:?} ",resp.data);
+                        }
+                        else if resp.header == "KeyboardEvent".to_string() {
+                            if let Ok(keyboard_event_struct) = serde_json::from_str::<KeyboardEvent>(&resp.data) {     
+                                if keyboard_event_struct.flags == 128{
+                                    send_keybd_input(keyboard_event_struct.scanCode,keyboard_event_struct.vkCode,KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP);                      
+                                }else if keyboard_event_struct.flags == 0{
+                                    send_keybd_input(keyboard_event_struct.scanCode,keyboard_event_struct.vkCode,KEYEVENTF_SCANCODE );                      
+                                }else if keyboard_event_struct.flags == 129{
+                                    send_keybd_input(0,keyboard_event_struct.vkCode,KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);                      
+                                }else if keyboard_event_struct.flags == 1{
+                                    send_keybd_input(0,keyboard_event_struct.vkCode,KEYEVENTF_UNICODE );                      
+                                }else if keyboard_event_struct.flags == 32{//make sure
+                                    send_keybd_input(0,keyboard_event_struct.vkCode,KEYEVENTF_UNICODE );                      
+                                }else if keyboard_event_struct.flags >> 5 % 2 ==  1{//make sure
+                                    send_keybd_input(0,keyboard_event_struct.vkCode,KEYEVENTF_UNICODE );                      
+                                }else if keyboard_event_struct.flags >> 7 % 2 ==  1{//make sure
+                                    send_keybd_input(0,keyboard_event_struct.vkCode,KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);                      
+                                }else{
+                                    println!("SOMETGHING DIFFERENT  {:?}",keyboard_event_struct.flags);
+                                    send_keybd_input(0,keyboard_event_struct.vkCode,KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);                      
+                                }
+                                //unhandled events : 160,161,33 (33 and 161 r together idfk 160)
+                            }
+                        }else if resp.header == "MouseEvent".to_string() {
+                            
+                            if let Ok(mouse_event_struct) = serde_json::from_str::<MouseEvent>(&resp.data) {  
+                                 
+                                if mouse_event_struct.flags != 0 {
+                                    match mouse_event_struct.flags{
+                                        MOUSEEVENTF_XDOWN|MOUSEEVENTF_XUP => send_mouse_input(mouse_event_struct.flags,mouse_event_struct.mouseData>>16,0,0),
+                                        MOUSEEVENTF_WHEEL|MOUSEEVENTF_HWHEEL =>send_mouse_input(mouse_event_struct.flags,if 7864320 == mouse_event_struct.mouseData {120} else {(120*-1) as u32},0,0),
+                                        _=> send_mouse_input(mouse_event_struct.flags,0,0,0)
+                                    }
+                                    
+                                }else{
+                                    move_rel(mouse_event_struct.pt.0,mouse_event_struct.pt.1)
+                                }
+                                //unhandled events : 160,161,33 (33 and 161 r together idfk 160)
+                            }
+                        }
+                        
+                        // resp.data.iter().for_each(|r| info!("{:?}", r));
+                    }
+                } 
+            }
+            _ => (),
+        }
+    }
+}
 
-//     let recv = EVENT_CHANNEL.1.lock().expect("Failed to unlock Mutex");
-//     // let mut events = Vec::new();
-//     let mut freeze_mouse = false;
-//     let mut last_position = (0.0, 0.0);
-//     for event in recv.iter() {
-//         // events.push(event);
-//         match event.name{
-//             Some(string) =>match string.as_str(){
-//                 "c"=>{
-//                     freeze_mouse = !freeze_mouse;
-//                     println!("freeze_mouse: {}, mousepositon : {:?}",freeze_mouse,last_position);
-//                 },
-//                 _ =>println!("char: {:?}",event.event_type)
-//             },
-//             None => ()
-//         }match event.event_type{
-//             EventType::MouseMove{x,y} =>{
-//                 if freeze_mouse{
-//                     match simulate(&EventType::MouseMove { x: last_position.0, y:last_position.1 }) {
-//                         Ok(()) => (),
-//                         Err(SimulateError) => {
-//                             println!("We could not send");
-//                         }
-//                     }
-//                 }else{
-//                     last_position =(x,y);
+// fn respond_with_public_recipes(sender: mpsc::UnboundedSender<ListResponse>, receiver: String) {
+//     tokio::spawn(async move {
+//         match read_local_recipes().await {
+//             Ok(recipes) => {
+//                 let resp = ListResponse {
+//                     mode: ListMode::ALL,
+//                     receiver,
+//                     data: recipes.into_iter().filter(|r| r.public).collect(),
+//                 };
+//                 if let Err(e) = sender.send(resp) {
+//                     error!("error sending response via channel, {}", e);
 //                 }
-//             },  
-//             _ =>()
+//             }
+//             Err(e) => error!("error fetching local recipes to answer ALL request, {}", e),
 //         }
-//         // println!("Received {} events", events.len());
-//     }
+//     });
 // }
-// use inputbot::{KeybdKey::*, MouseButton::*, *};
-// use std::{thread::sleep, time::Duration};
+
+impl NetworkBehaviourEventProcess<MdnsEvent> for RecipeBehaviour {
+    fn inject_event(&mut self, event: MdnsEvent) {
+        match event {
+            MdnsEvent::Discovered(discovered_list) => {
+                for (peer, _addr) in discovered_list {
+                    self.floodsub.add_node_to_partial_view(peer);
+                }
+            }
+            MdnsEvent::Expired(expired_list) => {
+                for (peer, _addr) in expired_list {
+                    if !self.mdns.has_node(&peer) {
+                        self.floodsub.remove_node_from_partial_view(&peer);
+                    }
+                }
+            }
+        }
+    }
+}
 
 
-// fn temp1() {
-//     let keys = vec![BackspaceKey,
-//     TabKey,
-//     EnterKey,
-//     EscapeKey,
-//     SpaceKey,
-//     HomeKey,
-//     LeftKey,
-//     UpKey,
-//     RightKey,
-//     DownKey,
-//     InsertKey,
-//     DeleteKey,
-//     Numrow0Key,
-//     Numrow1Key,
-//     Numrow2Key,
-//     Numrow3Key,
-//     Numrow4Key,
-//     Numrow5Key,
-//     Numrow6Key,
-//     Numrow7Key,
-//     Numrow8Key,
-//     Numrow9Key,
-//     AKey,
-//     BKey,
-//     CKey,
-//     DKey,
-//     EKey,
-//     FKey,
-//     GKey,
-//     HKey,
-//     IKey,
-//     JKey,
-//     KKey,
-//     LKey,
-//     MKey,
-//     NKey,
-//     OKey,
-//     PKey,
-//     QKey,
-//     RKey,
-//     SKey,
-//     TKey,
-//     UKey,
-//     VKey,
-//     WKey,
-//     XKey,
-//     YKey,
-//     ZKey,
-//     Numpad0Key,
-//     Numpad1Key,
-//     Numpad2Key,
-//     Numpad3Key,
-//     Numpad4Key,
-//     Numpad5Key,
-//     Numpad6Key,
-//     Numpad7Key,
-//     Numpad8Key,
-//     Numpad9Key,
-//     F1Key,
-//     F2Key,
-//     F3Key,
-//     F4Key,
-//     F5Key,
-//     F6Key,
-//     F7Key,
-//     F8Key,
-//     F9Key,
-//     F10Key,
-//     F11Key,
-//     F12Key,
-//     F13Key,
-//     F14Key,
-//     F15Key,
-//     F16Key,
-//     F17Key,
-//     F18Key,
-//     F19Key,
-//     F20Key,
-//     F21Key,
-//     F22Key,
-//     F23Key,
-//     F24Key,
-//     NumLockKey,
-//     ScrollLockKey,
-//     CapsLockKey,
-//     LShiftKey,
-//     RShiftKey,
-//     LControlKey,
-//     RControlKey,
-//     OtherKey(65 as u64),
-//     OtherKey(0x41),
-//     ];
-//     let mouseKeys = vec![LeftButton,
-//     MiddleButton,
-//     RightButton,
-//     X1Button,
-//     X2Button];
-//     // // Autorun for videogames.
-//     // NumLockKey.bind(|| {
-//     //     while NumLockKey.is_toggled() {
-//     //         LShiftKey.press();
-//     //         WKey.press();
-//     //         sleep(Duration::from_millis(50));
-//     //         WKey.release();
-//     //         LShiftKey.release();
-//     //     }
-//     // });
+#[tokio::main]
+async fn main() {
+    // println!("temp {:?}",131072>>16);
+    // let mouse_listener = get_mouse_recv();
+    //     thread::spawn( move || {
+    //         unsafe {set_block_mouse(true);}
+    //         receive_mouse_event();
+    // });
+    // for mouse_event_struct in mouse_listener.iter() {
+    //     println!("mouse_event_struct: pt: x: {:?},y: {:?},  scanCode: {:?}, flags: {:?}, time: {:?}, extra: {:?},",mouse_event_struct.pt.x,mouse_event_struct.pt.y, mouse_event_struct.mouseData,mouse_event_struct.flags,mouse_event_struct.time,mouse_event_struct.dwExtraInfo);
+           
+    // }
+    pretty_env_logger::init();
 
-//     // // Rapidfire for videogames.
-//     // RightButton.bind(|| {
-//     //     while RightButton.is_pressed() {
-//     //         LeftButton.press();
-//     //         sleep(Duration::from_millis(50));
-//     //         LeftButton.release();
-//     //     }
-//     // });
+    info!("Peer Id: {}", PEER_ID.clone());
+    println!("Peer Id: {}", PEER_ID.clone());
+    let (response_sender, mut response_rcv) = mpsc::unbounded_channel();
 
-//     // // Send a key sequence.
-//     // RKey.bind(|| KeySequence("Sample text").send());
+    let auth_keys = Keypair::<X25519Spec>::new()
+        .into_authentic(&KEYS)
+        .expect("can create auth keys");
 
-//     // // Move mouse.
-//     // QKey.bind(|| MouseCursor::move_rel(10, 10));
-//     // for k in keys{
-//     //     k.block_bind(|| println!("pain"));
-//     // }
-//     // OtherKey(0x41).press();
-//     // OtherKey(65 as u64).press();
-//     // KeybdKey::from(65 as u64).block_bind(|| println!("pain"));
-//     // AKey.block_bind(|| println!("pain"));
+    let transp = TokioTcpConfig::new()
+        .upgrade(upgrade::Version::V1)
+        .authenticate(NoiseConfig::xx(auth_keys).into_authenticated()) // XX Handshake pattern, IX exists as well and IK - only XX currently provides interop with other libp2p impls
+        .multiplex(mplex::MplexConfig::new())
+        .boxed();
+
+    let mut behaviour = RecipeBehaviour {
+        floodsub: Floodsub::new(PEER_ID.clone()),
+        mdns: TokioMdns::new().expect("can create mdns"),
+        response_sender,
+    };
+
+    behaviour.floodsub.subscribe(TOPIC.clone());
+
+    let mut swarm = SwarmBuilder::new(transp, behaviour, PEER_ID.clone())
+        .executor(Box::new(|fut| {
+            tokio::spawn(fut);
+        }))
+        .build();
+
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+
+    Swarm::listen_on(
+        &mut swarm,
+        "/ip4/0.0.0.0/tcp/0"
+            .parse()
+            .expect("can get a local socket"),
+    )
+    .expect("swarm can be started");
+    loop {
+        let evt = {
+            tokio::select! {
+                line = stdin.next_line() => Some(EventType::Input(line.expect("can get line").expect("can read line from stdin"))),
+                event = swarm.next() => {
+                    info!("Unhandled Swarm Event: {:?}", event);
+                    None
+                },
+                response = response_rcv.recv() => Some(EventType::Response(response.expect("response exists"))),
+            }
+        };
+
+        if let Some(event) = evt {
+            println!("event {:?}", event);
+            match event {
+                EventType::Response(mut resp) => {
+                    println!("Here!");
+                    if resp.header == "KeyboardEvent".to_string() || resp.header == "MouseEvent".to_string() {
+                        println!("Here2!");
+                        resp.receiver = get_all_users(&mut swarm).await
+                    }
+                    let json = serde_json::to_string(&resp).expect("can jsonify response");
+                    swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+                }
+                EventType::Input(line) => match line.as_str() {
+                    "ls p" => handle_list_peers(&mut swarm).await,
+                    "swap" => handle_swap(swarm.response_sender.clone()),
+                    cmd if cmd.starts_with("send test") => send_test(cmd, &mut swarm).await,
+                    _ => error!("unknown command"),
+                },
+            }
+        }
+    }
+}
+fn handle_swap(sender: mpsc::UnboundedSender<Message>) {
+    // thread::spawn(move || {
+    //     receive_keyboard_event(); 
+    // });
+    // receive_mouse_event();
     
-//     // OtherKey(18 as u64).blockable_bind(|| {println!("test"); BlockInput::Block});
-//     // OtherKey(91 as u64).block_bind(|| println!("pain"));
-//     // OtherKey(92 as u64).block_bind(|| println!("pain"));
-//     // for i in 0..256{
-//     //     KeybdKey::from(i as u64).block_bind(|| println!("pain"));
-//     // }
-//     for k in mouseKeys{
-//         k.block_bind(|| println!("pain"));
-//     }
-//     KeybdKey::from(18 as u64).block_bind(|| println!("pain"));
-//     // OtherKey(18 as u64).block_bind(|| println!("pain"));
-//     // WKey.block_bind(|| println!("pain"));
-//     // println!("{}",inputbot::KEYBD_BINDS );
-//     // Call this to start listening for bound inputs.
-//     handle_input_events();
-// }
-// extern crate user32;
-// extern crate winapi;
-// use std::{
-//     mem::{size_of, transmute_copy, MaybeUninit},
-//     ptr::null_mut,
-//     sync::atomic::AtomicPtr,
-// };
-// use winapi::{
-//     ctypes::*,
-//     shared::{minwindef::*, windef::*},
-//     um::winuser::*,
-// };
-// use once_cell::sync::Lazy;
-// static KEYBD_HHOOK: Lazy<AtomicPtr<HHOOK__>> = Lazy::new(AtomicPtr::default);
-// static MOUSE_HHOOK: Lazy<AtomicPtr<HHOOK__>> = Lazy::new(AtomicPtr::default);
-// // const WH_KEYBOARD_LL: i32 = 13;
-
-// fn main3() {
-//     // thread::spawn(move || {
-//     //     main2();
-//     // });
-//     unsafe {
-//         println!("keybd {:?}  mouse {:?}", KEYBD_HHOOK,MOUSE_HHOOK);
-//         let hook_id =
-//             user32::SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_callback), std::ptr::null_mut(), 0);
-//         // let hook_id2 =
-//         //     user32::SetWindowsHookExW(WH_MOUSE_LL, Some(hook_callback), std::ptr::null_mut(), 0);
-        
-//             let mut msg: MSG = { MaybeUninit::zeroed().assume_init() };
-//         GetMessageW(&mut msg, 0 as HWND, 0, 0);
-//         // Don't forget to release the hook eventually
-//         // user32::UnhookWindowsHookEx(hook_id);
-//     }
+    // let msg = Message {
+    //     header: "KeyboardEvent".to_string(),
+    //     data: "lolol".to_string(),
+    //     receiver: vec![],
+    // };
+    // if let Err(e) = sender.clone().send(msg) {
+    //     error!("error sending response via channel, {}", e);
+    // }
+    let keyboard_sender = sender.clone();
+    let mouse_sender = sender.clone();
     
-// }
+    tokio::spawn(async move {
+        let keyboard_listener = get_keyboard_recv();
+        thread::spawn( move || {
+            unsafe {set_block_keyboard(true);}
+            receive_keyboard_event();
+        });
+        for key_event_struct in keyboard_listener.iter() {
+            println!("key_event_struct: code123: {:?},  scanCode: {:?}, flags: {:?}, time: {:?}, extra: {:?},",key_event_struct.vkCode, key_event_struct.scanCode,key_event_struct.flags,key_event_struct.time,key_event_struct.dwExtraInfo);
+            let msg = Message {
+                header: "KeyboardEvent".to_string(),
+                data: serde_json::to_string(&KeyboardEvent{vkCode:key_event_struct.vkCode,scanCode:key_event_struct.scanCode,flags:key_event_struct.flags, }).expect("can jsonify request"),
+                receiver: vec![],
+            };
+            if let Err(e) = keyboard_sender.send(msg) {
+                error!("error sending response via channel, {}", e);
+            }
+            // let json = serde_json::to_string(&msg).expect("can jsonify request");
+            // swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+        }
+    });
+    tokio::spawn(async move {
+        let mouse_listener = get_mouse_recv();
+        thread::spawn( move || {
+            unsafe {set_block_mouse(true);}
+            receive_mouse_event();
+        });
+        for mouse_event_struct in mouse_listener.iter() {
+            println!("GOT MESSAGE!");
+            let msg = Message {
+                header: "MouseEvent".to_string(),
+                data: serde_json::to_string(&mouse_event_struct).expect("can jsonify request"),
+                receiver: vec![],
+            };
+            if let Err(e) = mouse_sender.send(msg) {
+                error!("error sending response via channel, {}", e);
+            }
+            // let json = serde_json::to_string(&msg).expect("can jsonify request");
+            // swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+        }
+    });
+    
 
-// unsafe extern "system" fn hook_callback(code: i32, wParam: u64, lParam: i64) -> i64 {
-//     // println!("code {} wPrarm {:?} lParam {:?}", code, wParam, lParam);
-//     // println!(" {:?} ",(KeybdKey::from(u64::from(
-//     //     (*(lParam as *const KBDLLHOOKSTRUCT)).vkCode,
-//     // ))));
-//     // if let OtherKey(key) = (KeybdKey::from(u64::from(//TODO should be i64 i think
-//     //     (*(lParam as *const KBDLLHOOKSTRUCT)).vkCode,
-//     // ))){
-//     //     if key == 164{
-//     //         println!("ALTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT");
-//     //         return 1;
-//     //     }else{
-//     //         println!("SADDDDDDDDDDDDDDDDDDDDD")
-//     //     }
-//     // }
-//     let key_event_struct = (*(lParam as *const KBDLLHOOKSTRUCT));
-//     println!("key_event_struct: code: {:?},  scanCode: {:?}, flags: {:?}, time: {:?}, extra: {:?},",key_event_struct.vkCode, key_event_struct.scanCode,key_event_struct.flags,key_event_struct.time,key_event_struct.dwExtraInfo);
-//     // let llhs = &*(lParam as *const MSLLHOOKSTRUCT);
-//     // println!("data x: {:?} y: {:?}",llhs.pt.x,llhs.pt.y);
-//     // match HIWORD(llhs.mouseData) {
-//     //     XBUTTON1 => println!("btn1 {:?}",XBUTTON1),
-//     //     XBUTTON2 => println!("btn2 {:?}",XBUTTON2),
-//     //     _ => (),
-//     // }
-//     0
-// }
+}
+async fn handle_list_peers(swarm: &mut Swarm<RecipeBehaviour>) {
+    let nodes = swarm.mdns.discovered_nodes();
+    let mut unique_peers = HashSet::new();
+    for peer in nodes {
+        unique_peers.insert(peer);
+    }
+    unique_peers.iter().for_each(|p| info!("{}", p));
+    unique_peers.iter().for_each(|p| println!("{}", p));
+}
+
+async fn get_all_users(swarm: &mut Swarm<RecipeBehaviour>) -> Vec<String> {
+    let nodes = swarm.mdns.discovered_nodes();
+    let mut array : Vec<String> = Vec::new();
+    for peer in nodes {
+        if !array.contains(&peer.to_string()){
+            array.push(peer.to_string());
+        }
+    }
+    array
+}
+
+async fn send_test(cmd: &str ,swarm: &mut Swarm<RecipeBehaviour>) {
+    let sender = swarm.response_sender.clone();
+    let msg = Message {
+        header: "KeyboardEvent".to_string(),
+        data: "lolol".to_string(),
+        receiver: vec![],
+    };
+    if let Err(e) = sender.clone().send(msg) {
+        error!("error sending response via channel, {}", e);
+    }
+    if let Some(rest) = cmd.strip_prefix("send test") {
+        let msg = Message {
+            header: "Test".to_string(),
+            data: rest.to_string(),
+            receiver: get_all_users(swarm).await
+        };
+        let json = serde_json::to_string(&msg).expect("can jsonify request");
+        swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+    }
+}
