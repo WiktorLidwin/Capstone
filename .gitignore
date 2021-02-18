@@ -4,4 +4,8 @@ test.py
 test2.py
 test3.py
 test4.py
+<<<<<<< HEAD
 Cargo.lock
+=======
+Cargo.lock
+>>>>>>> cf10000577333ed7949250cc387f8b3c5c0107b1
