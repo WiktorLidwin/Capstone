@@ -17,7 +17,6 @@ pub use winapi::{
 };
 pub use std::process;
 pub use once_cell::sync::Lazy;
-use crate::windows::keyboard::*;
 
 pub fn set_hook(
     hook_id: i32,

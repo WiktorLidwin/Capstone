@@ -40,6 +40,7 @@ pub struct MouseEvent {
     pub pt: (i32, i32),
     pub mouseData: DWORD,
     pub flags: DWORD,
+    pub time: i64,
 }
 
 pub fn receive_mouse_event(){
@@ -107,14 +108,16 @@ pub fn move_abs(x: i32, y: i32) {
     }
 }
 
-
+pub fn revert_mouse(){
+    unset_hook(&*MOUSE_HHOOK);
+}
 
 pub unsafe extern "system" fn mouse_hook_callback(code: i32, wParam: WPARAM, lParam: LPARAM) -> LRESULT {
     
     let mouse_event_struct = (*(lParam as *const MSLLHOOKSTRUCT));
-    println!("pos: {:?}",pos());
-    println!("Freeze pos: {:?}",FROZEN_MOUSE_POINT);
-    println!("recieved pos {:?}",(mouse_event_struct.pt.x,mouse_event_struct.pt.y));
+    // println!("pos: {:?}",pos());
+    // println!("Freeze pos: {:?}",FROZEN_MOUSE_POINT);
+    // println!("recieved pos {:?}",(mouse_event_struct.pt.x,mouse_event_struct.pt.y));
     // if !SET_FROZEN_MOUSE_POINT{
     //     SET_FROZEN_MOUSE_POINT = true;
     //     FROZEN_MOUSE_POINT = (mouse_event_struct.pt.x,mouse_event_struct.pt.y);
@@ -136,22 +139,40 @@ pub unsafe extern "system" fn mouse_hook_callback(code: i32, wParam: WPARAM, lPa
     // } {
 
     // }
-    let (x,y) = pos();
-    if mouse_event_struct.dwExtraInfo == 1 || !BLOCK_MOUSE {
-        // FROZEN_MOUSE_POINT = (mouse_event_struct.pt.x,mouse_event_struct.pt.y);
+    if mouse_event_struct.dwExtraInfo == 1{
         return 0
-    }else { 
-        MOUSE_EVENT_CHANNEL  
+    }
+
+    let (x,y) = pos();
+    // MOUSE_EVENT_CHANNEL  
+    //     .0
+    //     .lock()
+    //     .expect("Failed to unlock Mutex")
+    //     .send(MouseEvent{
+    //         pt: (mouse_event_struct.pt.x-x,mouse_event_struct.pt.y-y),
+    //         mouseData: mouse_event_struct.mouseData,
+    //         flags: wParamToFlag(wParam),
+    //         time: 0,
+    //     })
+    //     .expect("Receiving end of KEYBOARD_EVENT_CHANNEL was closed");
+    // FROZEN_MOUSE_POINT = (mouse_event_struct.pt.x,mouse_event_struct.pt.y);
+    MOUSE_EVENT_CHANNEL  
         .0
         .lock()
         .expect("Failed to unlock Mutex")
         .send(MouseEvent{
-            pt: (mouse_event_struct.pt.x-x,mouse_event_struct.pt.y-y),
+            pt: (mouse_event_struct.pt.x - x,mouse_event_struct.pt.y - y),
             mouseData: mouse_event_struct.mouseData,
             flags: wParamToFlag(wParam),
+            time: 0,
         })
         .expect("Receiving end of KEYBOARD_EVENT_CHANNEL was closed");
-        FROZEN_MOUSE_POINT = (mouse_event_struct.pt.x,mouse_event_struct.pt.y);
+    FROZEN_MOUSE_POINT = (mouse_event_struct.pt.x,mouse_event_struct.pt.y);
+    if !BLOCK_MOUSE {
+        // FROZEN_MOUSE_POINT = (mouse_event_struct.pt.x,mouse_event_struct.pt.y);
+        return 0
+    }else { 
+        
         return 1
     }
 }
