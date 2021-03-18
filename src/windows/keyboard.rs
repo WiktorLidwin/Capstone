@@ -1,13 +1,19 @@
 // #[path = "./common.rs"]
 use crate::windows::common::*;
 use crate::windows::mouse::*;
+use serde::{Deserialize, Serialize};
 pub static mut EXITKEYS:Vec<u32> = vec![];
 pub static mut EXITKEYSDOWN:Vec<bool> = vec![];
 pub static mut CYCLEKEYS:Vec<u32> = vec![];
 pub static mut CYCLEKEYSDOWN:Vec<bool> = vec![];
 pub static mut BLOCK_KEYBOARD:bool = true;
+#[path="../events.rs"]
+mod events;
+use crate::events::events::{KeyboardEvent, MouseEvent, LinuxEvent};
+use crate::events::events::*;
+
 lazy_static! {
-    pub static ref KEYBOARD_EVENT_CHANNEL: (Mutex<Sender<KBDLLHOOKSTRUCT>>, Mutex<Receiver<KBDLLHOOKSTRUCT>>) = {
+    pub static ref KEYBOARD_EVENT_CHANNEL: (Mutex<Sender<KeyboardEvent>>, Mutex<Receiver<KeyboardEvent>>) = {
         let (send, recv) = unbounded();
         (Mutex::new(send), Mutex::new(recv))
     };
@@ -22,7 +28,7 @@ lazy_static! {
     pub static ref KEYBD_HHOOK: Lazy<AtomicPtr<HHOOK__>> = Lazy::new(AtomicPtr::default);
     
 }
-pub fn get_keyboard_recv() -> Receiver<KBDLLHOOKSTRUCT>{
+pub fn get_keyboard_recv() -> Receiver<KeyboardEvent>{
     KEYBOARD_EVENT_CHANNEL
         .1
         .lock()
@@ -70,6 +76,8 @@ pub unsafe fn setcyclekeys(keys: Vec<u32>){
     }
 }
 
+
+
 pub fn receive_keyboard_event(){
     // unsafe{
     //     EXITKEYSDOWN = vec![];
@@ -107,7 +115,7 @@ pub fn receive_keyboard_event(){
     // };
 }
 
-unsafe fn check_cycle_keys(keyboard_event_struct:&KBDLLHOOKSTRUCT ) -> bool {
+unsafe fn check_cycle_keys(keyboard_event_struct:&KeyboardEvent ) -> bool {
     if let Some(pos) = CYCLEKEYS.iter().position(|&x| x == keyboard_event_struct.scanCode){
         if (keyboard_event_struct.flags >> 7) % 2 ==  1{
             for i in pos..CYCLEKEYSDOWN.len(){
@@ -134,7 +142,7 @@ unsafe fn check_cycle_keys(keyboard_event_struct:&KBDLLHOOKSTRUCT ) -> bool {
     false
 }
 
-unsafe fn check_exit_keys(keyboard_event_struct:&KBDLLHOOKSTRUCT ) -> bool {
+unsafe fn check_exit_keys(keyboard_event_struct:&KeyboardEvent ) -> bool {
     if let Some(pos) = EXITKEYS.iter().position(|&x| x == keyboard_event_struct.scanCode){
         if (keyboard_event_struct.flags >> 7) % 2 ==  1{
             for i in pos..EXITKEYSDOWN.len(){
@@ -165,7 +173,19 @@ unsafe fn check_exit_keys(keyboard_event_struct:&KBDLLHOOKSTRUCT ) -> bool {
 
 pub unsafe extern "system" fn keyboard_hook_callback(code: i32, wParam: WPARAM, lParam: LPARAM) -> LRESULT {
     let mut keyboard_event_struct = (*(lParam as *const KBDLLHOOKSTRUCT));// keyboard_event_struct.vkCode == HOTKEY
-    if check_exit_keys(&keyboard_event_struct){
+    let mut extendedkey = 0;
+    if keyboard_event_struct.flags % 2 ==  1{
+        println!("exteneded");
+        extendedkey += 57344;
+    }
+    let new_event = KeyboardEvent{
+        vkCode: keyboard_event_struct.vkCode,
+        scanCode: keyboard_event_struct.scanCode + extendedkey,
+        flags: keyboard_event_struct.flags,
+        time: 0,
+    };
+    
+    if check_exit_keys(&new_event){
         TERMINATEPROGRAM
         .0
         .lock()
@@ -173,7 +193,7 @@ pub unsafe extern "system" fn keyboard_hook_callback(code: i32, wParam: WPARAM, 
         .send(true)
         .expect("Receiving end of TERMINATEPROGRAM was closed");
     }
-    if check_cycle_keys(&keyboard_event_struct){
+    if check_cycle_keys(&new_event){
         CYCLEPROGRAM
         .0
         .lock()
@@ -193,7 +213,7 @@ pub unsafe extern "system" fn keyboard_hook_callback(code: i32, wParam: WPARAM, 
         .0
         .lock()
         .expect("Failed to unlock Mutex")
-        .send(keyboard_event_struct)
+        .send(new_event)
         .expect("Receiving end of KEYBOARD_EVENT_CHANNEL was closed");
         
     if  !BLOCK_KEYBOARD {
@@ -220,12 +240,12 @@ pub fn send_keybd_input(scan_code: u32, key_code: u32, flags: u32) {
         type_: INPUT_KEYBOARD,
         u: unsafe {
             transmute_copy(&KEYBDINPUT {
-                wVk: key_code as u16,
+                wVk:  key_code as u16,
                 wScan: scan_code as u16,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 1,
-            })//MapVirtualKeyW(key_code, 0) as u16
+            })//MapVirtualKeyW(u64::from(key_code) as u32, 0) as u16
         },
     };
     unsafe { SendInput(1, &mut input as LPINPUT, size_of::<INPUT>() as c_int) };

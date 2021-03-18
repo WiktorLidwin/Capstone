@@ -18,6 +18,11 @@ pub use winapi::{
 pub use std::process;
 pub use once_cell::sync::Lazy;
 
+#[path="../events.rs"]
+mod events;
+use crate::events::events::{KeyboardEvent, MouseEvent, LinuxEvent};
+use crate::events::events::*;
+
 pub fn set_hook(
     hook_id: i32,
     hook_ptr: &AtomicPtr<HHOOK__>,

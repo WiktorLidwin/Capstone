@@ -1,7 +1,9 @@
 // #[path = "./common.rs"]
 use crate::windows::common::*;
-use serde::{Deserialize, Serialize};
-
+#[path="../events.rs"]
+mod events;
+use crate::events::events::{KeyboardEvent, MouseEvent, LinuxEvent};
+use crate::events::events::*;
 
 pub static mut BLOCK_MOUSE:bool = false;
 pub static mut FROZEN_MOUSE_POINT:(i32,i32) = (0,0);
@@ -35,13 +37,6 @@ pub unsafe fn get_frozen_mouse_point() -> (i32,i32) {
     FROZEN_MOUSE_POINT
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MouseEvent {
-    pub pt: (i32, i32),
-    pub mouseData: DWORD,
-    pub flags: DWORD,
-    pub time: i64,
-}
 
 pub fn receive_mouse_event(){
     // thread::spawn(move || {
