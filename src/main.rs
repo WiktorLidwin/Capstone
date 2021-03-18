@@ -69,6 +69,20 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use crate::windows::*;
 
+#[path="events.rs"]
+mod events;
+use crate::events::events::{KeyboardEvent, MouseEvent, LinuxEvent};
+use crate::events::events::*;
+
+// #[path = "../../TicTacToeStructs.rs"]
+// mod TicTacToeStructs;
+// use crate::TicTacToeStructs::TicTacToeStructs::Message;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use crate::linux::*;
+
 fn searchDeviceName(device_name: String) -> String {
     unsafe {
         for (peer_id, device) in &*DEVICENAMESMAP {
@@ -329,7 +343,7 @@ impl Set {
                 .load(sender.clone());
         };
         println!("finished startset");
-        print!("{:?}",PERIPHERAL_RECEIVERS
+        println!("{:?}",PERIPHERAL_RECEIVERS
             .lock()
             .expect("Failed to unlock Mutex"));
     
@@ -410,6 +424,7 @@ impl Profile {
         // hash_map[sender] = receivers;
         // ig make nicknames
     } //TODO
+    #[cfg(target_os = "windows")]
     fn load(&self, sender: mpsc::UnboundedSender<(Message, i32)>) {
         println!("loading...");
         // if let Some(val) = self.mouse_target.get(&PEER_ID.to_string()) {
@@ -467,6 +482,35 @@ impl Profile {
         // let mouse_RECEIVERS = self.mouse_target.get(&PEER_ID.to_string()).unwrap().clone();
         // let keyboard_RECEIVERS = self.keyboard_target.get(&PEER_ID.to_string()).unwrap().clone();
         // swap_keyboard(sender.clone(),keyboard_RECEIVERS);
+    }
+    #[cfg(target_os = "linux")]
+    fn load(&self, sender: mpsc::UnboundedSender<(Message, i32)>) {
+        println!("in loading....");
+        reset_all_devices();
+        for (peripheral, targets) in &self.peripheral_receivers{
+            println!("peripheral {}: {:?}", peripheral, targets);
+            if let Some(val) = targets.get(&PEER_ID.to_string()) {
+                println!("inside {:?}",val);
+                if val.clone().iter().any(|i| (*i) == PEER_ID.to_string()) {
+                    println!("not blocking ");
+                    set_peripheral_block(peripheral.clone(),false);
+                } else {
+                    println!("blocking ");
+                    set_peripheral_block(peripheral.clone(),true);
+                }
+                PERIPHERAL_RECEIVERS
+                    .lock()
+                    .expect("Failed to unlock Mutex")
+                    .insert(peripheral.clone(), val.clone());
+            }else{
+                set_peripheral_block(peripheral.clone(),false);
+                PERIPHERAL_RECEIVERS
+                    .lock()
+                    .expect("Failed to unlock Mutex")
+                    .insert(peripheral.clone(), vec![]);
+            }
+
+        }
     }
 }
 
@@ -528,12 +572,13 @@ fn convert_sets_to_save() -> Vec<SaveSet> {
                 for (key, value) in profile.peripheral_receivers.iter() {
                     let mut temp_hashmap = HashMap::new();
                     for (key2, value2) in value.iter() {
+                        println!("key2: {:?}, value2: {:?}", key,value2);
                         temp_hashmap.insert(
                             from_mac_addr_to_string(DEVICENAMESMAP.get(key2).expect(key2).mac_addr.clone().to_vec()),
                             value2
                                 .clone()
                                 .into_iter()
-                                .map(|x| from_mac_addr_to_string(DEVICENAMESMAP.get(&x.clone()).unwrap().mac_addr.clone().to_vec()))
+                                .map(|x| from_mac_addr_to_string(DEVICENAMESMAP.get(&x.clone()).expect(&x).mac_addr.clone().to_vec()))
                                 .collect(),
                         );
                     }
@@ -644,14 +689,6 @@ enum EventType {
     Input(String),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct KeyboardEvent {
-    vkCode: u32,
-    scanCode: u32,
-    flags: u32,
-    time: i64,
-}
-
 #[derive(NetworkBehaviour)]
 struct RecipeBehaviour {
     floodsub: Floodsub,
@@ -741,59 +778,162 @@ fn handle_ChangeName(resp: Message){
         }
     }
 }
-
+#[cfg(target_os = "windows")]
 fn handle_KeyboardEvent(resp: Message) {
+    println!("got keyboard event");
     if let Ok(keyboard_event_struct) = serde_json::from_str::<KeyboardEvent>(&resp.data) {
         let dt = chrono::prelude::Local::now();
         let milliseconds: i64 = dt.timestamp_millis();
         unsafe { KEYBOARDAVARAGE.push(milliseconds - keyboard_event_struct.time) };
-        if keyboard_event_struct.vkCode == 66 {
-            println!("AAAAA :D")
-        }
-        if keyboard_event_struct.flags == 128 {
-            send_keybd_input(
-                keyboard_event_struct.scanCode,
-                keyboard_event_struct.vkCode,
-                KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
-            );
-        } else if keyboard_event_struct.flags == 0 {
-            send_keybd_input(
-                keyboard_event_struct.scanCode,
-                keyboard_event_struct.vkCode,
-                KEYEVENTF_SCANCODE,
-            );
-        } else if keyboard_event_struct.flags == 129 {
+        if (keyboard_event_struct.flags >> 7) % 2 ==  1{
+            // println!("mouse up!");
             send_keybd_input(
                 0,
                 keyboard_event_struct.vkCode,
                 KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
             );
-        } else if keyboard_event_struct.flags == 1 {
-            send_keybd_input(0, keyboard_event_struct.vkCode, KEYEVENTF_UNICODE);
-        } else if keyboard_event_struct.flags == 32 {
-            //make sure
-            send_keybd_input(0, keyboard_event_struct.vkCode, KEYEVENTF_UNICODE);
-        } else if (keyboard_event_struct.flags >> 5) % 2 == 1 {
-            //make sure
-            send_keybd_input(0, keyboard_event_struct.vkCode, KEYEVENTF_UNICODE);
-        } else if (keyboard_event_struct.flags >> 7) % 2 == 1 {
-            //make sure
+        }else{
+            // println!("mouse down?");
             send_keybd_input(
                 0,
                 keyboard_event_struct.vkCode,
-                KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-            );
-        } else {
-            println!("SOMETGHING DIFFERENT  {:?}", keyboard_event_struct.flags);
-            send_keybd_input(
-                0,
-                keyboard_event_struct.vkCode,
-                KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                KEYEVENTF_UNICODE,
             );
         }
+        
+        // if (keyboard_event_struct.flags >> 7) % 2 ==  1{
+        //     // println!("mouse up!");
+        //     if keyboard_event_struct.flags % 2 ==  1{
+        //         send_keybd_input(
+        //             keyboard_event_struct.scanCode,
+        //             keyboard_event_struct.vkCode,
+        //             KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY,
+        //         );
+        //     }else{
+        //         send_keybd_input(
+        //             keyboard_event_struct.scanCode,
+        //             keyboard_event_struct.vkCode,
+        //             KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
+        //         );
+        //     }
+            
+        // }else{
+        //     // println!("mouse down?");
+        //     if keyboard_event_struct.flags % 2 ==  1{
+        //         send_keybd_input(
+        //             keyboard_event_struct.scanCode,
+        //             keyboard_event_struct.vkCode,
+        //             KEYEVENTF_SCANCODE |KEYEVENTF_EXTENDEDKEY ,
+        //         );
+        //     }else{
+        //         send_keybd_input(
+        //             keyboard_event_struct.scanCode,
+        //             keyboard_event_struct.vkCode,
+        //             KEYEVENTF_SCANCODE,
+        //         );
+        //     }
+        // }
+        
+
+
+        // if keyboard_event_struct.vkCode == 66 {
+        //     println!("AAAAA :D")
+        // }
+        // if keyboard_event_struct.flags == 128 {
+        //     send_keybd_input(
+        //         keyboard_event_struct.scanCode,
+        //         keyboard_event_struct.vkCode,
+        //         KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
+        //     );
+        // } else if keyboard_event_struct.flags == 0 {
+        //     send_keybd_input(
+        //         keyboard_event_struct.scanCode,
+        //         keyboard_event_struct.vkCode,
+        //         KEYEVENTF_SCANCODE,
+        //     );
+        // } else if keyboard_event_struct.flags == 129 {
+        //     send_keybd_input(
+        //         0,
+        //         keyboard_event_struct.vkCode,
+        //         KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+        //     );
+        // } else if keyboard_event_struct.flags == 1 {
+        //     send_keybd_input(0, keyboard_event_struct.vkCode, KEYEVENTF_UNICODE);
+        // } else if keyboard_event_struct.flags == 32 {
+        //     //make sure
+        //     send_keybd_input(0, keyboard_event_struct.vkCode, KEYEVENTF_UNICODE);
+        // } else if (keyboard_event_struct.flags >> 5) % 2 == 1 {
+        //     //make sure
+        //     send_keybd_input(0, keyboard_event_struct.vkCode, KEYEVENTF_UNICODE);
+        // } else if (keyboard_event_struct.flags >> 7) % 2 == 1 {
+        //     //make sure
+        //     send_keybd_input(
+        //         0,
+        //         keyboard_event_struct.vkCode,
+        //         KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+        //     );
+        // } else {
+        //     println!("SOMETGHING DIFFERENT  {:?}", keyboard_event_struct.flags);
+        //     send_keybd_input(
+        //         0,
+        //         keyboard_event_struct.vkCode,
+        //         KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+        //     );
+        // }
         //unhandled events : 160,161,33 (33 and 161 r together idfk 160)
     }
+    if let Ok(peripheral_event_struct) = serde_json::from_str::<LinuxEvent>(&resp.data) {
+        let keyboard_event_struct = from_linux_keyboard_event(peripheral_event_struct);
+        if (keyboard_event_struct.flags >> 7) % 2 ==  1{
+            // println!("mouse up!");
+            if keyboard_event_struct.flags % 2 ==  1{
+                send_keybd_input(
+                    keyboard_event_struct.scanCode,
+                    keyboard_event_struct.vkCode,
+                    KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY,
+                );
+            }else{
+                send_keybd_input(
+                    keyboard_event_struct.scanCode,
+                    keyboard_event_struct.vkCode,
+                    KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
+                );
+            }
+            
+        }else{
+            // println!("mouse down?");
+            if keyboard_event_struct.flags % 2 ==  1{
+                send_keybd_input(
+                    keyboard_event_struct.scanCode,
+                    keyboard_event_struct.vkCode,
+                    KEYEVENTF_SCANCODE |KEYEVENTF_EXTENDEDKEY ,
+                );
+            }else{
+                send_keybd_input(
+                    keyboard_event_struct.scanCode,
+                    keyboard_event_struct.vkCode,
+                    KEYEVENTF_SCANCODE,
+                );
+            }
+        }
+    }
 }
+
+
+
+#[cfg(target_os = "linux")]
+fn handle_KeyboardEvent(resp: Message) {
+    println!("linux unimplemented");
+    if let Ok(peripheral_event_struct) = serde_json::from_str::<LinuxEvent>(&resp.data) {
+        write_to_sim_device(peripheral_event_struct);
+    }
+    if let Ok(keyboard_event_struct) = serde_json::from_str::<KeyboardEvent>(&resp.data) {
+        let peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+        write_to_sim_device(peripheral_event_struct);
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn handle_MouseEvent(resp: Message) {
     if let Ok(mouse_event_struct) = serde_json::from_str::<MouseEvent>(&resp.data) {
         let dt = chrono::prelude::Local::now();
@@ -823,6 +963,10 @@ fn handle_MouseEvent(resp: Message) {
             move_rel(mouse_event_struct.pt.0, mouse_event_struct.pt.1) //TODO
         }
     }
+}
+#[cfg(target_os = "linux")]
+fn handle_MouseEvent(resp: Message) {
+    println!("linux unimplemented");
 }
 fn handle_Ping(resp: Message, sender: mpsc::UnboundedSender<(Message, i32)>) {
     let dt = chrono::prelude::Local::now();
@@ -1179,6 +1323,7 @@ fn handle_auto_connect(receiver: String, sender: mpsc::UnboundedSender<(Message,
     }
 }
 //Windows
+#[cfg(target_os = "windows")]
 fn addDevices() {
     PERIPHERAL_RECEIVERS
         .lock()
@@ -1190,8 +1335,21 @@ fn addDevices() {
         .insert("mouse".to_string(), vec![]);
 }
 
+#[cfg(target_os = "linux")]
+fn addDevices() {
+    let linuxdevices = get_linux_devices();
+    for device in linuxdevices { 
+        PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .insert(device.id.clone().to_string(), vec![]);
+    }
+}
+
 //for Windows
+#[cfg(target_os = "windows")]
 fn init(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    addDevices();
     // let array = [1, 2, 3];
     // crossbeam::scope(|scope| {
     //     for i in &array {
@@ -1244,6 +1402,94 @@ fn init(sender: mpsc::UnboundedSender<(Message, i32)>) {
             //cycle profiles
         }
     });
+}
+
+#[cfg(target_os = "linux")]
+fn init(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    linux::init();
+    addDevices();
+    println!("devices {:?}",get_linux_devices());
+    for device in get_linux_devices(){
+        let recv = get_peripheral_receiver_with_id(device.id.to_string());
+        let per_sender = sender.clone();//to send info to other users
+        let id = device.id.to_string();
+        thread::spawn(move || {
+            for event in recv.iter() {
+                handle_peripheral_event(id.clone(), event, per_sender.clone());
+            }
+        });
+        let id = device.id.to_string();
+        thread::spawn(move || {
+            grab_peripheral_with_id(id);
+        });
+    }
+    let terminate_sender = sender.clone();
+    thread::spawn(move || {
+        let recv = get_exitkeys_recv();
+        for _ in recv.iter() {
+            handle_terminate(terminate_sender.clone());
+        }
+    });
+    let cycle_sender = sender.clone();
+    thread::spawn(move || {
+        let recv = get_cyclekeys_recv();
+        for _ in recv.iter() {  
+            handle_cycle(cycle_sender.clone());
+            //cycle profiles
+        }
+    });
+    reset_all_devices();
+}
+
+#[cfg(target_os = "linux")]
+fn handle_peripheral_event(peripheral: String, event: LinuxEvent, sender: mpsc::UnboundedSender<(Message, i32)>){
+    let temp_receivers = PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .get(&peripheral)
+        .unwrap()
+        .clone();
+    // println!("event {:?}   {:?}", event, peripheral);
+    if peripheral == "16".to_owned() {
+        println!("event {:?}", event);
+    }
+
+    if temp_receivers.len() != 0 {
+        let mut buff = from_linux_mouse_event(&event);
+        if buff[0] != 0{
+            // let mut buff = from_linux_mouse_event(&event);
+            if buff[0] != 1 {
+                println!("sending buff {:?}", buff);
+            }
+            unsafe {
+                for (key, value) in &*UDPMAP {
+                    if temp_receivers.iter().any(|i| i == key) {
+                        UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
+                    }
+                }
+            }
+        }
+
+        let mut header = "".to_string();
+        if event.type_ == 1 {
+            header = "KeyboardEvent".to_string();
+        }
+        if header != "".to_string() {
+            let msg = Message {
+                sender: PEER_ID.to_string(),
+                header: header,
+                data: serde_json::to_string(&event)
+                .expect("can jsonify request"),
+                receiver: temp_receivers,
+            };
+            if let Err(e) = sender.send((msg, 1)) {
+                error!("error sending response via channel, {}", e);
+            }
+        }else{
+            //idk add all the other events?
+        }
+        
+    }
 }
 
 // fn respond_with_public_recipes(sender: mpsc::UnboundedSender<ListResponse>, receiver: String) {
@@ -1369,7 +1615,7 @@ async fn main() {
             .expect("can get a local socket"),
     )
     .expect("swarm can be started");
-    addDevices();
+
     init(swarm.response_sender.clone());
 
     swarm
@@ -1414,6 +1660,7 @@ async fn main() {
     });
     println!("here");
     //UDP socket perma listener
+    
     thread::spawn(move || {
         loop {
             // println!("Receiving MOUSE MOVE!");
@@ -1421,30 +1668,7 @@ async fn main() {
             let (amt, src) = UDPSOCKET.recv_from(&mut buf).unwrap();
             let buff = &mut buf[..amt];
 
-            if buff[3]
-                == (Wrapping(buff[0] as i8) + Wrapping(buff[1] as i8) + Wrapping(buff[2] as i8)).0
-                    as u8
-            {
-                if buff[0] == 1 {
-                    // move_rel((buff[1] as i8) as i32,(buff[2]as i8) as i32);
-                    send_mouse_input(
-                        MOUSEEVENTF_MOVE,
-                        0,
-                        (buff[1] as i8) as i32,
-                        (buff[2] as i8) as i32,
-                    )
-                } else {
-                    // send_mouse_input(intToMouseFlag(buff[0]),0,0,0)
-                    send_mouse_input(
-                        intToMouseFlag(buff[0]),
-                        0,
-                        (buff[1] as i8) as i32,
-                        (buff[2] as i8) as i32,
-                    )
-                }
-            } else {
-                println!("WOW THATS A SURPRISE!!!")
-            }
+            handle_udp_mouse_input(buff);
             //move_rel(mouse_event_struct.pt.0,mouse_event_struct.pt.1)
         }
     });
@@ -1487,7 +1711,7 @@ async fn main() {
                     if topic == 0 {
                         swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
                     } else if topic == 1 {
-                        print!("subtopic {:?}", SUBTOPIC.lock().expect("Could not lock mutex"));
+                        println!("subtopic {:?}", SUBTOPIC.lock().expect("Could not lock mutex"));
                         swarm.floodsub.publish(
                             SUBTOPIC.lock().expect("Could not lock mutex").clone(),
                             json.as_bytes(),
@@ -1545,11 +1769,46 @@ async fn main() {
                     cmd if cmd.starts_with("trustdevices") => unsafe {
                         handle_trustdevice(cmd, swarm.response_sender.clone())
                     },
+                    "peripherals" => handle_peripherals(),
                     "subtopic" => handle_subtopic(),
                     _ => error!("unknown command"),
                 },
             }
         }
+    }
+}
+#[cfg(target_os = "windows")]
+fn handle_udp_mouse_input(buff: &mut [u8]){
+    if buff[3]
+                == (Wrapping(buff[0] as i8) + Wrapping(buff[1] as i8) + Wrapping(buff[2] as i8)).0
+                    as u8
+            {
+                if buff[0] == 1 {
+                    // move_rel((buff[1] as i8) as i32,(buff[2]as i8) as i32);
+                    send_mouse_input(
+                        MOUSEEVENTF_MOVE,
+                        0,
+                        (buff[1] as i8) as i32,
+                        (buff[2] as i8) as i32,
+                    )
+                } else {
+                    // send_mouse_input(intToMouseFlag(buff[0]),0,0,0)
+                    send_mouse_input(
+                        intToMouseFlag(buff[0]),
+                        0,
+                        (buff[1] as i8) as i32,
+                        (buff[2] as i8) as i32,
+                    )
+                }
+            } else {
+                println!("WOW THATS A SURPRISE!!!")
+            }
+}
+
+#[cfg(target_os = "linux")]
+fn handle_udp_mouse_input(buff: &mut [u8]){
+    for event in from_windows_mouse_event(buff){
+        write_to_sim_device(event);
     }
 }
 
@@ -1665,11 +1924,23 @@ fn handle_terminate(sender: mpsc::UnboundedSender<(Message, i32)>) {
     println!("unswappping......");
     println!("unswappping......");
     println!("unswappping......");
-    handle_unswap("unswap mouse keyboard", sender.clone());
+    let mut temp_string = " ".to_string();
+    unsafe {
+        for (k,v) in PERIPHERAL_RECEIVERS.lock().unwrap().iter() {
+            temp_string += &k.clone();
+            temp_string += " ";
+        }
+    }
+    handle_unswap(&("unswap".to_string() + &temp_string), sender.clone());
+}
+
+fn reset_peripheral_receivers(){
+    addDevices();
 }
 
 fn handle_cycle(sender: mpsc::UnboundedSender<(Message, i32)>) {
     let set = CURRENTSET.lock().expect("Could not lock mutex").clone();
+    reset_peripheral_receivers();
     if set != "" {
         println!("cycling....");
         Set::cycleProfiles(
@@ -1679,6 +1950,7 @@ fn handle_cycle(sender: mpsc::UnboundedSender<(Message, i32)>) {
     }
 }
 
+
 fn set_currentset(newset: String) {
     println!("here??? in currentset");
     let mut state = CURRENTSET.lock().unwrap();
@@ -1686,31 +1958,57 @@ fn set_currentset(newset: String) {
     println!("here!!! in currentset");
 }
 
+
+#[cfg(target_os = "windows")]
 fn set_keyboard_block(state: bool) {
     unsafe {
         set_block_keyboard(state);
     }
 }
 
-fn set_keyboard_recivers(recivers: Vec<String>) {
+
+#[cfg(target_os = "windows")]
+fn edit_peripheral_receivers(peripheral: String,recivers: Vec<String>) {
     // KEYBOARD_RECEIVERS = Mutex::new(recivers);
     // let mut state = KEYBOARD_RECEIVERS.lock().expect("Could not lock mutex");
     // *state = recivers;
-    PERIPHERAL_RECEIVERS
-        .lock()
-        .expect("Failed to unlock Mutex")
-        .insert("keyboard".to_string(), recivers);
+    match peripheral.as_str(){
+        "mouse" => {PERIPHERAL_RECEIVERS
+            .lock()
+            .expect("Failed to unlock Mutex")
+            .insert("mouse".to_string(), recivers);
+        },
+        "keyboard" => {
+            PERIPHERAL_RECEIVERS
+            .lock()
+            .expect("Failed to unlock Mutex")
+            .insert("keyboard".to_string(), recivers);
+        },
+        _ =>()
+    }
+    
 }
 
-fn set_mouse_recivers(recivers: Vec<String>) {
-    // let mut state = MOUSE_RECEIVERS.lock().expect("Could not lock mutex");
-    // *state = recivers;
+#[cfg(target_os = "linux")]
+fn edit_peripheral_receivers(peripheral: String,recivers: Vec<String>) {
     PERIPHERAL_RECEIVERS
         .lock()
         .expect("Failed to unlock Mutex")
-        .insert("mouse".to_string(), recivers);
+        .insert(peripheral.clone(), recivers);
 }
+
+// #[cfg(target_os = "windows")]
+// fn set_mouse_recivers(recivers: Vec<String>) {
+//     // let mut state = MOUSE_RECEIVERS.lock().expect("Could not lock mutex");
+//     // *state = recivers;
+//     PERIPHERAL_RECEIVERS
+//         .lock()
+//         .expect("Failed to unlock Mutex")
+//         .insert("mouse".to_string(), recivers);
+// }
+
 //windows
+#[cfg(target_os = "windows")]
 fn set_peripheral_block(peripheral: String,blocking:bool) {
     match peripheral.as_str(){
         "mouse" => set_mouse_block(blocking),
@@ -1719,14 +2017,24 @@ fn set_peripheral_block(peripheral: String,blocking:bool) {
     }
 }
 
+
+#[cfg(target_os = "linux")]
+fn set_peripheral_block(peripheral: String,blocking:bool) {
+    println!("calling block with {}", blocking);
+    let blockingsender = get_peripheral_blocker_with_id(peripheral.clone());
+    blockingsender.clone().send(blocking).unwrap();
+}
+
+#[cfg(target_os = "windows")]
 fn set_mouse_block(state: bool) {
     unsafe {
         set_block_mouse(state);
     }
 }
 
+#[cfg(target_os = "windows")]
 fn handle_keyboard_event(
-    key_event_struct: KBDLLHOOKSTRUCT,
+    mut key_event_struct: KeyboardEvent,
     sender: mpsc::UnboundedSender<(Message, i32)>,
 ) {
     let temp_receivers = PERIPHERAL_RECEIVERS
@@ -1735,19 +2043,16 @@ fn handle_keyboard_event(
         .get(&"keyboard".to_string())
         .unwrap()
         .clone();
+
     if temp_receivers.len() != 0 {
         println!("Sending keuboard event to :{:?}!", temp_receivers);
         let dt = chrono::prelude::Local::now();
         let milliseconds: i64 = dt.timestamp_millis();
+        key_event_struct.time = milliseconds;
         let msg = Message {
             sender: PEER_ID.to_string(),
             header: "KeyboardEvent".to_string(),
-            data: serde_json::to_string(&KeyboardEvent {
-                vkCode: key_event_struct.vkCode,
-                scanCode: key_event_struct.scanCode,
-                flags: key_event_struct.flags,
-                time: milliseconds,
-            })
+            data: serde_json::to_string(&key_event_struct)
             .expect("can jsonify request"),
             receiver: temp_receivers,
         };
@@ -1776,6 +2081,7 @@ fn handle_keyboard_event(
     // }
 }
 
+#[cfg(target_os = "windows")]
 fn handle_mouse_event(
     mut mouse_event_struct: MouseEvent,
     sender: mpsc::UnboundedSender<(Message, i32)>,
@@ -1834,6 +2140,8 @@ fn handle_mouse_event(
     }
 }
 
+
+#[cfg(target_os = "windows")]
 fn mouseFlagToInt(flag: DWORD) -> u8 {
     return match flag {
         MOUSEEVENTF_LEFTDOWN => 2,
@@ -1845,33 +2153,51 @@ fn mouseFlagToInt(flag: DWORD) -> u8 {
         _ => 0,
     };
 }
-
+#[cfg(target_os = "windows")]
 fn intToMouseFlag(flag: u8) -> DWORD {
     return match flag {
         2 => MOUSEEVENTF_LEFTDOWN,
         3 => MOUSEEVENTF_RIGHTDOWN,
-        4 => MOUSEEVENTF_RIGHTDOWN,
+        4 => MOUSEEVENTF_MIDDLEDOWN,
         5 => MOUSEEVENTF_LEFTUP,
         6 => MOUSEEVENTF_RIGHTUP,
         7 => MOUSEEVENTF_MIDDLEUP,
         _ => 0,
     };
 }
-
+#[cfg(target_os = "windows")]
 fn unswap(rest: String) {
     let elements: Vec<&str> = rest.split(" ").collect();
     for f in &elements {
         match f {
             &"mouse" => {
-                set_mouse_block(false);
-                set_mouse_recivers(vec![]);
+                set_peripheral_block("mouse".to_string(), false);
+                // set_mouse_recivers(vec![]);
+                edit_peripheral_receivers("mouse".to_string(), vec![]);
             }
             &"keyboard" => {
-                set_keyboard_block(false);
-                set_keyboard_recivers(vec![]);
+                set_peripheral_block("keyboard".to_string(), false);
+                // set_keyboard_recivers(vec![]);
+                edit_peripheral_receivers("keyboard".to_string(), vec![]);
             }
             invalid => {
                 println!("Invalid item to swap: {}", invalid)
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn unswap(rest: String) {
+    let elements: Vec<&str> = rest.split(" ").collect();
+    for f in &elements {
+        match f {
+            &"" => (),
+            &" " => (),
+            id => {
+                set_peripheral_block(id.clone().to_string(), false);
+                // set_keyboard_recivers(vec![]);
+                edit_peripheral_receivers(id.clone().to_string(), vec![]);
             }
         }
     }
@@ -1997,6 +2323,11 @@ fn handle_editprofile(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) 
                 a => receivers.push(a.to_owned()),
             };
         }
+        println!("{:?}  {:?}  {:?}  {:?}  {:?}  ",elements[0].trim().to_owned(),
+        elements[1].trim().to_owned(),
+        elements[2].trim().to_owned(),
+        sender_id,
+        receivers);
         Set::editProfile(
             elements[0].trim().to_owned(),
             elements[1].trim().to_owned(),
@@ -2201,6 +2532,19 @@ fn handle_trustdevice(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) 
 }
 
 fn handle_test(){
-    println!("the fuck??");
-    println!("subtopic {:?}", SUBTOPIC.lock().expect("Could not lock mutex"));
+    println!("PERIPHERAL_RECEIVERS {:?}", PERIPHERAL_RECEIVERS.lock().expect("Could not lock mutex"));
+}
+
+#[cfg(target_os = "windows")]
+fn handle_peripherals(){
+    println!("mouse");
+    println!("keyboard");
+}
+
+
+#[cfg(target_os = "linux")]
+fn handle_peripherals(){
+    for device in get_linux_devices(){
+        println!("id: {:?} name:{:?}", device.id, device.name);
+    }
 }
