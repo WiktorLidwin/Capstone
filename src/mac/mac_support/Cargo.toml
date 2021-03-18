@@ -1,0 +1,12 @@
+[package]
+name = "mac_support"
+version = "0.1.0"
+authors = ["Nithin S Vadakken <31045730+nithinvadakken@users.noreply.github.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rdev = "0.4.2"
+enigo = "0.0.14"
+futures = "0.3"
