@@ -152,7 +152,7 @@ struct StartMessage {
 struct Profile {
     // mouse_target: HashMap<String, Vec<String>>,
     // keyboard_target: HashMap<String, Vec<String>>,
-    peripheral_receivers: HashMap<String,HashMap<(String,bool), Vec<(String,bool)>>>,
+    peripheral_receivers: HashMap<String,HashMap<String, Vec<String>>>,
     id: String,
 }
 
@@ -425,12 +425,7 @@ impl Profile {
         //     return;
         // }
         let mut temp_hashmap = HashMap::new();
-        let mut new_receivers = vec![];
-        for receiver in receivers{
-            new_receivers.push((receiver.clone(),true))
-        }
-        temp_hashmap.insert((sender,true), new_receivers);
-        
+        temp_hashmap.insert(sender, receivers);
         self.peripheral_receivers.insert(
             peripheral,
             temp_hashmap
@@ -473,23 +468,17 @@ impl Profile {
         // }
         for (peripheral, targets) in &self.peripheral_receivers{
             println!("peripheral {}: {:?}", peripheral, targets);
-            if let Some(val) = targets.get(&(PEER_ID.to_string(),true)) {
+            if let Some(val) = targets.get(&PEER_ID.to_string()) {
                 println!("inside {:?}",val);
-                if val.clone().iter().any(|i| (*i.0) == PEER_ID.to_string()) {
+                if val.clone().iter().any(|i| (*i) == PEER_ID.to_string()) {
                     set_peripheral_block(peripheral.clone(),false);
                 } else {
                     set_peripheral_block(peripheral.clone(),true);
                 }
-                let mut receivers = vec![];
-                for receiver in val{
-                    if receiver.1 == true{
-                        receivers.push(receiver.0.clone())
-                    }
-                }
                 PERIPHERAL_RECEIVERS
                     .lock()
                     .expect("Failed to unlock Mutex")
-                    .insert(peripheral.clone(), receivers.clone());
+                    .insert(peripheral.clone(), val.clone());
             }else{
                 set_peripheral_block(peripheral.clone(),false);
                 PERIPHERAL_RECEIVERS
@@ -593,39 +582,14 @@ fn convert_sets_to_save() -> Vec<SaveSet> {
                     let mut temp_hashmap = HashMap::new();
                     for (key2, value2) in value.iter() {
                         println!("key2: {:?}, value2: {:?}", key,value2);
-                        if key2.1 == true{
-                            temp_hashmap.insert(
-                                from_mac_addr_to_string(DEVICENAMESMAP.get(&key2.0).expect(&key2.0).mac_addr.clone().to_vec()),
-                                value2
-                                    .clone()
-                                    .into_iter()
-                                    .map(|x| {
-                                            if x.1 == true{
-                                                from_mac_addr_to_string(DEVICENAMESMAP.get(&x.0.clone()).expect(&x.0).mac_addr.clone().to_vec())
-                                            }else{
-                                                x.0
-                                            }   
-                                        }
-                                    )
-                                    .collect(),
-                            );
-                        }else{
-                            temp_hashmap.insert(
-                                key2.0.clone(),
-                                value2
-                                    .clone()
-                                    .into_iter()
-                                    .map(|x| {
-                                            if x.1 == true{
-                                                from_mac_addr_to_string(DEVICENAMESMAP.get(&x.0.clone()).expect(&x.0).mac_addr.clone().to_vec())
-                                            }else{
-                                                x.0
-                                            }   
-                                        }
-                                    )
-                                    .collect(),
-                            );
-                        }
+                        temp_hashmap.insert(
+                            from_mac_addr_to_string(DEVICENAMESMAP.get(key2).expect(key2).mac_addr.clone().to_vec()),
+                            value2
+                                .clone()
+                                .into_iter()
+                                .map(|x| from_mac_addr_to_string(DEVICENAMESMAP.get(&x.clone()).expect(&x).mac_addr.clone().to_vec()))
+                                .collect(),
+                        );
                     }
                     save_profile.peripheral_receivers.insert(
                         key.clone(),
@@ -664,35 +628,11 @@ fn from_save_sets(save_sets: Vec<SaveSet>) -> Vec<Set> {
                         let peer_id = searchDeviceMacAddress(from_string_to_mac_addr(key2.clone()));
                         if peer_id != "".to_string() {
                             temp_hashmap.insert(
-                                (peer_id,true),
+                                peer_id,
                                 value2
                                     .clone()
                                     .into_iter()
-                                    .map(|x| {
-                                        let temp = searchDeviceMacAddress(from_string_to_mac_addr(x.clone()));
-                                        if temp == "".to_string(){
-                                            (x.clone(),false)
-                                        }else{
-                                            (temp,true)
-                                        }
-                                        
-                                    })
-                                    .collect(),
-                            );
-                        }else{
-                            temp_hashmap.insert(
-                                (key2.clone(),false),
-                                value2
-                                    .clone()
-                                    .into_iter()
-                                    .map(|x| {
-                                        let temp = searchDeviceMacAddress(from_string_to_mac_addr(x.clone()));
-                                        if temp == "".to_string(){
-                                            (x.clone(),false)
-                                        }else{
-                                            (temp,true)
-                                        }
-                                    })
+                                    .map(|x| searchDeviceMacAddress(from_string_to_mac_addr(x.clone())))
                                     .collect(),
                             );
                         }
