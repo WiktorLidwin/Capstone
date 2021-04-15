@@ -717,7 +717,7 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for RecipeBehaviour {
     fn inject_event(&mut self, event: FloodsubEvent) {
         match event {
             FloodsubEvent::Message(msg) => {
-                println!("getting msg!");
+                // println!("getting msg!");
                 if let Ok(resp) = serde_json::from_slice::<Message>(&msg.data) {
                     if resp.receiver.contains(&PEER_ID.to_string()) {
                         if resp.header == "Test".to_string() {
@@ -789,7 +789,7 @@ fn handle_ChangeName(resp: Message){
 
 #[cfg(target_os = "windows")]
 fn handle_KeyboardEvent(resp: Message) {
-    println!("got keyboard event");
+    // println!("got keyboard event");/
     if let Ok(keyboard_event_struct) = serde_json::from_str::<KeyboardEvent>(&resp.data) {
         let dt = chrono::prelude::Local::now();
         let milliseconds: i64 = dt.timestamp_millis();
@@ -1470,6 +1470,8 @@ fn handle_peripheral_event(peripheral: String, event: LinuxEvent, sender: mpsc::
             }
             let last_instant = LASTMOUSEINSTANT.lock().unwrap().elapsed();
             if last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 > 1.0 as f64/(MOUSE_RATE.lock().unwrap().clone() as f64){
+                // println!("diff: {}",last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 - 1.0 as f64/(MOUSE_RATE.lock().unwrap().clone() as f64));
+                // println!("mouserate: {:?}",MOUSE_RATE.lock().unwrap().clone());
                 let mut state = MOUSE_BUFFER.lock().unwrap();
                 *state = (0, 0);
                 unsafe {
@@ -1479,12 +1481,18 @@ fn handle_peripheral_event(peripheral: String, event: LinuxEvent, sender: mpsc::
                         }
                     }
                 }
+                let mut instant_state = LASTMOUSEINSTANT.lock().unwrap();
+                *instant_state = Instant::now();
             }else{
+                print!("limiting!");
                 let mut state = MOUSE_BUFFER.lock().unwrap();
                 *state = (mouse_buffer_clone.0+(buff[1] as i8) as i32, mouse_buffer_clone.1+(buff[2] as i8) as i32);
-            }
-            
+            }   
         }
+
+        // if event.type_ == 2 {
+
+        // }
 
         let mut header = "".to_string();
         if event.type_ == 1 {
@@ -1727,7 +1735,7 @@ async fn main() {
                     if topic == 0 {
                         swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
                     } else if topic == 1 {
-                        println!("subtopic {:?}", SUBTOPIC.lock().expect("Could not lock mutex"));
+                        // println!("subtopic {:?}", SUBTOPIC.lock().expect("Could not lock mutex"));
                         swarm.floodsub.publish(
                             SUBTOPIC.lock().expect("Could not lock mutex").clone(),
                             json.as_bytes(),
@@ -2064,7 +2072,7 @@ fn handle_keyboard_event(
         .clone();
 
     if temp_receivers.len() != 0 {
-        println!("Sending keuboard event to :{:?}!", temp_receivers);
+        // println!("Sending keuboard event to :{:?}!", temp_receivers);
         let dt = chrono::prelude::Local::now();
         let milliseconds: i64 = dt.timestamp_millis();
         key_event_struct.time = milliseconds;
@@ -2123,7 +2131,10 @@ fn handle_mouse_event(
                 .0 as u8;
 
             let last_instant = LASTMOUSEINSTANT.lock().unwrap().elapsed();
-            if last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 > 1.0 as f64/(MOUSE_RATE.lock().unwrap().clone() as f64){
+            let mouse_rate = MOUSE_RATE.lock().unwrap().clone() as f64;
+            if last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 > 1.0 as f64/mouse_rate{
+                println!("diff: {}",last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 - 1.0 as f64/mouse_rate);
+                println!("mouserate: {:?}",mouse_rate);
                 let mut state = MOUSE_BUFFER.lock().unwrap();
                 *state = (0, 0);
                 unsafe {
@@ -2133,6 +2144,8 @@ fn handle_mouse_event(
                         }
                     }
                 }
+                let mut instant_state = LASTMOUSEINSTANT.lock().unwrap();
+                *instant_state = Instant::now();
             }else{
                 let mut state = MOUSE_BUFFER.lock().unwrap();
                 *state = (mouse_buffer_clone.0+(buff[1] as i8) as i32, mouse_buffer_clone.1+(buff[2] as i8) as i32);
@@ -2146,7 +2159,7 @@ fn handle_mouse_event(
             buff[3] = intType;
             unsafe {
                 for (key, value) in &*UDPMAP {
-                    println!("Sending mouse btn");
+                    // println!("Sending mouse btn");
                     if recivers.iter().any(|i| i == key) {
                         UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
                     }
@@ -2580,7 +2593,7 @@ fn handle_peripherals(){
 }
 
 fn handle_mouserate(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
-    if let Some(rest) = cmd.strip_prefix("mousetate") {
+    if let Some(rest) = cmd.strip_prefix("mouserate") {
         let newrate = rest.trim().to_owned().parse::<i32>().unwrap();
         let mut state = MOUSE_RATE.lock().unwrap();
         *state = newrate;

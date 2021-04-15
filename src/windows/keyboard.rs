@@ -175,7 +175,7 @@ pub unsafe extern "system" fn keyboard_hook_callback(code: i32, wParam: WPARAM, 
     let mut keyboard_event_struct = (*(lParam as *const KBDLLHOOKSTRUCT));// keyboard_event_struct.vkCode == HOTKEY
     let mut extendedkey = 0;
     if keyboard_event_struct.flags % 2 ==  1{
-        println!("exteneded");
+        // println!("exteneded");
         extendedkey += 57344;
     }
     let new_event = KeyboardEvent{
