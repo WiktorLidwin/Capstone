@@ -7,3 +7,6 @@ test4.py
 =======
 /src/main1.rs
 Cargo.lock
+/src/mac/mac_support/target
+/src/mac/mac_support/cargo.lock
+

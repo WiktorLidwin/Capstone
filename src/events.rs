@@ -25,6 +25,8 @@ pub mod events{
         pub flags: u32,
         pub time: i64,
     }
+    
+
 
     //linux codes  
     //mouse move - type 2 
@@ -87,19 +89,19 @@ pub mod events{
 
     use std::num::Wrapping;
     // to 4 but input 
-    pub fn from_linux_mouse_event(event: &LinuxEvent) -> [u8; 4]{
+    pub fn from_linux_mouse_event(event: &LinuxEvent, buffer: (i32,i32)) -> [u8; 4]{
         let mut buff = [0; 4];
         if event.type_ == 2{
             buff[0] = 1 as u8;
             if event.code == 0{
-                buff[1] = (event.value as i8) as u8;
-                buff[2] = 0;
+                buff[1] = (event.value as i8) as u8 + buffer.0 as u8;
+                buff[2] = buffer.1 as u8;
                 buff[3] = (Wrapping(buff[0] as i8) + Wrapping(buff[1] as i8) + Wrapping(buff[2] as i8)).0 as u8;
                 return buff
             }
             if event.code == 1{
-                buff[1] = 0;
-                buff[2] = (event.value as i8) as u8;
+                buff[1] = buffer.0 as u8;
+                buff[2] = (event.value as i8) as u8  + buffer.1 as u8;
                 buff[3] = (Wrapping(buff[0] as i8) + Wrapping(buff[1] as i8) + Wrapping(buff[2] as i8)).0 as u8;
                 return buff
             }

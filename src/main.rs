@@ -25,12 +25,14 @@ use std::num::Wrapping;
 use std::path::PathBuf;
 use std::{thread, time};
 use tokio::{fs, io::AsyncBufReadExt, sync::mpsc};
+use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
 
 static KEYS: Lazy<identity::Keypair> = Lazy::new(|| identity::Keypair::generate_ed25519());
 static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
 static TOPIC: Lazy<Topic> = Lazy::new(|| Topic::new("Capstone"));
+
 
 static KEYLENGTH: usize = 6;
 static mut KEYBOARDAVARAGE: Vec<i64> = vec![];
@@ -50,6 +52,7 @@ static mut HOST: bool = true;
 // static mut MOUSEDESTINATION: Vec<String> = vec![];
 static mut SETS: Vec<Set> = vec![];
 
+
 lazy_static! {
     static ref TERMINATETHREADS: (Mutex<Sender<bool>>, Mutex<Receiver<bool>>) = {
         let (send, recv) = unbounded();
@@ -62,6 +65,10 @@ lazy_static! {
     static ref PERIPHERAL_RECEIVERS: Mutex<HashMap<String, Vec<String>>> =
         Mutex::new(HashMap::new());
     static ref AUTOCONNECT: Mutex<Vec<u8>> = Mutex::new(vec![]);
+    static ref MOUSE_RATE:Mutex<i32> =  Mutex::new(120);
+    static ref MOUSE_BUFFER:Mutex<(i32,i32)> =  Mutex::new((0,0));
+    static ref LASTMOUSEINSTANT:Mutex<Instant> =  Mutex::new(Instant::now());
+    
 }
 
 #[cfg(target_os = "windows")]
@@ -125,6 +132,7 @@ struct StartMessage {
     set: String,
     profile: String,
 }
+
 
 // impl Device {
 //     fn editName(self, peer_id:String, new_name: String,sender: mpsc::UnboundedSender<(Message, i32)>) {
@@ -778,6 +786,7 @@ fn handle_ChangeName(resp: Message){
         }
     }
 }
+
 #[cfg(target_os = "windows")]
 fn handle_KeyboardEvent(resp: Message) {
     println!("got keyboard event");
@@ -1450,24 +1459,31 @@ fn handle_peripheral_event(peripheral: String, event: LinuxEvent, sender: mpsc::
         .unwrap()
         .clone();
     // println!("event {:?}   {:?}", event, peripheral);
-    if peripheral == "16".to_owned() {
-        println!("event {:?}", event);
-    }
 
     if temp_receivers.len() != 0 {
-        let mut buff = from_linux_mouse_event(&event);
+        let mouse_buffer_clone = MOUSE_BUFFER.lock().unwrap().clone();
+        let mut buff = from_linux_mouse_event(&event,mouse_buffer_clone.clone());
         if buff[0] != 0{
             // let mut buff = from_linux_mouse_event(&event);
             if buff[0] != 1 {
                 println!("sending buff {:?}", buff);
             }
-            unsafe {
-                for (key, value) in &*UDPMAP {
-                    if temp_receivers.iter().any(|i| i == key) {
-                        UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
+            let last_instant = LASTMOUSEINSTANT.lock().unwrap().elapsed();
+            if last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 > 1.0 as f64/(MOUSE_RATE.lock().unwrap().clone() as f64){
+                let mut state = MOUSE_BUFFER.lock().unwrap();
+                *state = (0, 0);
+                unsafe {
+                    for (key, value) in &*UDPMAP {
+                        if temp_receivers.iter().any(|i| i == key) {
+                            UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
+                        }
                     }
                 }
+            }else{
+                let mut state = MOUSE_BUFFER.lock().unwrap();
+                *state = (mouse_buffer_clone.0+(buff[1] as i8) as i32, mouse_buffer_clone.1+(buff[2] as i8) as i32);
             }
+            
         }
 
         let mut header = "".to_string();
@@ -1768,6 +1784,9 @@ async fn main() {
                     },
                     cmd if cmd.starts_with("trustdevices") => unsafe {
                         handle_trustdevice(cmd, swarm.response_sender.clone())
+                    },
+                    cmd if cmd.starts_with("mouserate") => unsafe {
+                        handle_mouserate(cmd, swarm.response_sender.clone())
                     },
                     "peripherals" => handle_peripherals(),
                     "subtopic" => handle_subtopic(),
@@ -2095,19 +2114,30 @@ fn handle_mouse_event(
     if recivers.len() != 0 {
         let intType = mouseFlagToInt(mouse_event_struct.flags);
         if mouse_event_struct.flags == 0 {
+            let mouse_buffer_clone = MOUSE_BUFFER.lock().unwrap().clone();
             let mut buff: [u8; 4] = [0; 4];
             buff[0] = 1 as u8;
             buff[1] = (mouse_event_struct.pt.0 as i8) as u8;
             buff[2] = (mouse_event_struct.pt.1 as i8) as u8;
             buff[3] = (Wrapping(buff[0] as i8) + Wrapping(buff[1] as i8) + Wrapping(buff[2] as i8))
                 .0 as u8;
-            unsafe {
-                for (key, value) in &*UDPMAP {
-                    if recivers.iter().any(|i| i == key) {
-                        UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
+
+            let last_instant = LASTMOUSEINSTANT.lock().unwrap().elapsed();
+            if last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 > 1.0 as f64/(MOUSE_RATE.lock().unwrap().clone() as f64){
+                let mut state = MOUSE_BUFFER.lock().unwrap();
+                *state = (0, 0);
+                unsafe {
+                    for (key, value) in &*UDPMAP {
+                        if recivers.iter().any(|i| i == key) {
+                            UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
+                        }
                     }
                 }
+            }else{
+                let mut state = MOUSE_BUFFER.lock().unwrap();
+                *state = (mouse_buffer_clone.0+(buff[1] as i8) as i32, mouse_buffer_clone.1+(buff[2] as i8) as i32);
             }
+            
         } else if intType != 0 {
             let mut buff: [u8; 4] = [0; 4];
             buff[0] = intType;
@@ -2546,5 +2576,13 @@ fn handle_peripherals(){
 fn handle_peripherals(){
     for device in get_linux_devices(){
         println!("id: {:?} name:{:?}", device.id, device.name);
+    }
+}
+
+fn handle_mouserate(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("mousetate") {
+        let newrate = rest.trim().to_owned().parse::<i32>().unwrap();
+        let mut state = MOUSE_RATE.lock().unwrap();
+        *state = newrate;
     }
 }
