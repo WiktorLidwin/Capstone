@@ -312,6 +312,7 @@ impl Set {
                 thread::spawn(move || Set::startSet(set_id, sender.clone()));
             }
         }
+        reset_ctrl_shift()
     }
     fn startProfile(
         set_id: String,
@@ -1449,6 +1450,68 @@ fn init(sender: mpsc::UnboundedSender<(Message, i32)>) {
     });
     reset_all_devices();
 }
+
+#[cfg(target_os = "windows")]
+fn reset_ctrl_shift(){
+    send_keybd_input(
+        0,
+        0x11,
+        KEYEVENTF_UNICODE,
+    );
+    send_keybd_input(
+        0,
+        0x10,
+        KEYEVENTF_UNICODE,
+    );
+    send_keybd_input(
+        0,
+        0xA0,
+        KEYEVENTF_UNICODE,
+    );
+    send_keybd_input(
+        0,
+        0xA1,
+        KEYEVENTF_UNICODE,
+    );
+}
+#[cfg(target_os = "linux")]
+fn reset_ctrl_shift(){
+    let keyboard_event_struct = KeyboardEvent{
+        vkCode: 0x11,
+        scanCode: 0,
+        flags: 0,
+        time: 0,
+    };
+    let peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    keyboard_event_struct = KeyboardEvent{
+        vkCode: 0x10,
+        scanCode: 0,
+        flags: 0,
+        time: 0,
+    };
+    peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    keyboard_event_struct = KeyboardEvent{
+        vkCode: 0xA0,
+        scanCode: 0,
+        flags: 0,
+        time: 0,
+    };
+    peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    keyboard_event_struct = KeyboardEvent{
+        vkCode: 0xA1,
+        scanCode: 0,
+        flags: 0,
+        time: 0,
+    };
+    peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+}
+
 
 #[cfg(target_os = "linux")]
 fn handle_peripheral_event(peripheral: String, event: LinuxEvent, sender: mpsc::UnboundedSender<(Message, i32)>){
