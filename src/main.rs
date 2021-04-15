@@ -1286,4 +1286,1439 @@ fn handle_SuccessfulConnect(sender: mpsc::UnboundedSender<(Message, i32)>) {
 }
 
 fn handle_AutoConnectAttempt(resp: Message, sender: mpsc::UnboundedSender<(Message, i32)>){
-    if let Ok(device) = serde... (53 KB left)
+    if let Ok(device) = serde_json::from_str::<Device>(&resp.data) {
+    
+        unsafe {
+            if TRUSTEDDEVICES
+                .iter()
+                .any(|mac_addr| mac_addr == &device.mac_addr)
+            {
+                let msg = Message {
+                    sender: PEER_ID.to_string(),
+                    header: "AutoConnectConfirm".to_string(),
+                    data: serde_json::to_string(&(DEVICENAMESMAP.get(&PEER_ID.clone().to_string()), SUBTOPIC.lock().expect("Could not lock mutex").id()))
+                        .expect("can jsonify request"),
+                    receiver: vec![resp.sender.clone()],
+                };
+                if let Err(e) = sender.send((msg, 0)) {
+                    error!("error sending response via channel, {}", e);
+                }else{
+                    publishUDPSocket(sender.clone(), resp.sender.clone());
+                    DEVICENAMESMAP.insert(resp.sender.to_string(), device);
+                   
+                }
+            }
+        }
+    }
+}
+
+fn handle_AutoConnectConfirm(resp: Message, sender: mpsc::UnboundedSender<(Message, i32)>,floodsub: &mut Floodsub,){
+    if let Ok(devicestr) = serde_json::from_str::<(Device,String)>(&resp.data) {
+        let device = devicestr.0;
+        let id = devicestr.1;
+        let mut subtopic = SUBTOPIC.lock().expect("Could not lock mutex");
+        println!("unsubscribing... {:?}", subtopic.id());
+        floodsub.unsubscribe(subtopic.clone());
+        *subtopic = Topic::new(id);
+        floodsub.subscribe(subtopic.clone());
+        unsafe {
+            HOST = false;
+            DEVICENAMESMAP.insert(resp.sender.to_string(), device);
+        };
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "AutoConnectSuccess".to_string(),
+            data: "".to_string(),
+            receiver: vec![resp.sender.clone()],
+        };
+        if let Err(e) = sender.send((msg, 0)) {
+            error!("error sending response via channel, {}", e);
+        }
+    }
+}
+
+fn handle_AutoConnectSuccess( sender: mpsc::UnboundedSender<(Message, i32)>){
+    unsafe {
+        tokio::spawn(async move {
+            SETS = from_save_sets(Set::loadFromDefaultFile().await);
+            updateSet(sender.clone());
+        });
+    }
+}
+
+async fn loadTrustedDevices() -> Option<Vec<[u8; 6]>> {
+    let mut local_path = getlocalPath();
+    local_path.push("TrustedDevices");
+    if Path::new(&local_path).exists() {
+        let data = fs::read_to_string(local_path)
+            .await
+            .expect("Unable to read file");
+        let temp = serde_json::from_str::<SaveTrustedDevices>(&data).unwrap();
+        return Some(temp.mac_addresses);
+    }
+    None
+}
+
+async fn writeTrustedDevices(mac_addresses: Vec<[u8; 6]>) {
+    let mut local_path = getlocalPath();
+    local_path.push("TrustedDevices");
+    let data =
+        serde_json::to_string(&SaveTrustedDevices { mac_addresses }).expect("can jsonify response");
+    fs::write(local_path, data)
+        .await
+        .expect("Unable to write file");
+}
+
+fn handleNewUDPSocket(sender: String, udpAddr: String) {
+    println!("Logging UDP socket");
+    unsafe {
+        UDPMAP.insert(sender.to_string(), udpAddr.to_string());
+        println!("{:?}", UDPMAP);
+    };
+}
+
+fn handle_auto_connect(receiver: String, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    println!("attempting to auto conenct...");
+    unsafe {
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "AutoConnectAttempt".to_string(),
+            data: serde_json::to_string(&DEVICENAMESMAP.get(&PEER_ID.clone().to_string()))
+                .expect("can jsonify request"),
+            receiver: vec![receiver.clone()],
+        };
+        if let Err(e) = sender.send((msg, 0)) {
+            error!("error sending response via channel, {}", e);
+        }
+    }
+}
+//Windows
+#[cfg(target_os = "windows")]
+fn addDevices() {
+    PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .insert("keyboard".to_string(), vec![]);
+    PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .insert("mouse".to_string(), vec![]);
+}
+
+#[cfg(target_os = "linux")]
+fn addDevices() {
+    let linuxdevices = get_linux_devices();
+    for device in linuxdevices { 
+        PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .insert(device.id.clone().to_string(), vec![]);
+    }
+}
+
+//for Windows
+#[cfg(target_os = "windows")]
+fn init(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    addDevices();
+    // let array = [1, 2, 3];
+    // crossbeam::scope(|scope| {
+    //     for i in &array {
+    //         scope.spawn(move |_| {
+    //             println!("element: {}", i);
+    //         });
+    //     }
+    // });
+    // crossbeam_utils::thread::scope(|scope| {
+
+    // });
+    unsafe {
+        set_block_keyboard(false);
+    }
+    thread::spawn(move || {
+        receive_keyboard_event();
+    });
+    let keyboard_listener = get_keyboard_recv();
+    let keyboard_sender = sender.clone();
+    thread::spawn(move || {
+        for key_event_struct in keyboard_listener.iter() {
+            handle_keyboard_event(key_event_struct, keyboard_sender.clone());
+        }
+    });
+    unsafe {
+        set_block_mouse(false);
+    }
+    thread::spawn(move || {
+        receive_mouse_event();
+    });
+    let mouse_listener = get_mouse_recv();
+    let mouse_sender = sender.clone();
+    thread::spawn(move || {
+        for mouse_event_struct in mouse_listener.iter() {
+            handle_mouse_event(mouse_event_struct, mouse_sender.clone());
+        }
+    });
+    let terminate_sender = sender.clone();
+    thread::spawn(move || {
+        let recv = get_exitkeys_recv();
+        for _ in recv.iter() {
+            handle_terminate(terminate_sender.clone());
+        }
+    });
+    let cycle_sender = sender.clone();
+    thread::spawn(move || {
+        let recv = get_cyclekeys_recv();
+        for _ in recv.iter() {
+            handle_cycle(cycle_sender.clone());
+            //cycle profiles
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn init(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    linux::init();
+    addDevices();
+    println!("devices {:?}",get_linux_devices());
+    for device in get_linux_devices(){
+        let recv = get_peripheral_receiver_with_id(device.id.to_string());
+        let per_sender = sender.clone();//to send info to other users
+        let id = device.id.to_string();
+        thread::spawn(move || {
+            for event in recv.iter() {
+                handle_peripheral_event(id.clone(), event, per_sender.clone());
+            }
+        });
+        let id = device.id.to_string();
+        thread::spawn(move || {
+            grab_peripheral_with_id(id);
+        });
+    }
+    let terminate_sender = sender.clone();
+    thread::spawn(move || {
+        let recv = get_exitkeys_recv();
+        for _ in recv.iter() {
+            handle_terminate(terminate_sender.clone());
+        }
+    });
+    let cycle_sender = sender.clone();
+    thread::spawn(move || {
+        let recv = get_cyclekeys_recv();
+        for _ in recv.iter() {  
+            handle_cycle(cycle_sender.clone());
+            //cycle profiles
+        }
+    });
+    reset_all_devices();
+}
+
+#[cfg(target_os = "windows")]
+fn reset_ctrl_shift(){
+    send_keybd_input(
+        0,
+        0x11,
+        KEYEVENTF_UNICODE,
+    );
+    send_keybd_input(
+        0,
+        0x10,
+        KEYEVENTF_UNICODE,
+    );
+    send_keybd_input(
+        0,
+        0xA0,
+        KEYEVENTF_UNICODE,
+    );
+    send_keybd_input(
+        0,
+        0xA1,
+        KEYEVENTF_UNICODE,
+    );
+}
+#[cfg(target_os = "linux")]
+fn reset_ctrl_shift(){
+    let keyboard_event_struct = KeyboardEvent{
+        vkCode: 0x11,
+        scanCode: 0,
+        flags: 0,
+        time: 0,
+    };
+    let peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    keyboard_event_struct = KeyboardEvent{
+        vkCode: 0x10,
+        scanCode: 0,
+        flags: 0,
+        time: 0,
+    };
+    peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    keyboard_event_struct = KeyboardEvent{
+        vkCode: 0xA0,
+        scanCode: 0,
+        flags: 0,
+        time: 0,
+    };
+    peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+    keyboard_event_struct = KeyboardEvent{
+        vkCode: 0xA1,
+        scanCode: 0,
+        flags: 0,
+        time: 0,
+    };
+    peripheral_event_struct = from_windows_keyboard_event(keyboard_event_struct);
+    write_to_sim_device(peripheral_event_struct);
+}
+
+
+#[cfg(target_os = "linux")]
+fn handle_peripheral_event(peripheral: String, event: LinuxEvent, sender: mpsc::UnboundedSender<(Message, i32)>){
+    let temp_receivers = PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .get(&peripheral)
+        .unwrap()
+        .clone();
+    // println!("event {:?}   {:?}", event, peripheral);
+
+    if temp_receivers.len() != 0 {
+        let mouse_buffer_clone = MOUSE_BUFFER.lock().unwrap().clone();
+        let mut buff = from_linux_mouse_event(&event,mouse_buffer_clone.clone());
+        if buff[0] != 0{
+            // let mut buff = from_linux_mouse_event(&event);
+            if buff[0] != 1 {
+                println!("sending buff {:?}", buff);
+            }
+            let last_instant = LASTMOUSEINSTANT.lock().unwrap().elapsed();
+            if last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 > 1.0 as f64/(MOUSE_RATE.lock().unwrap().clone() as f64){
+                // println!("diff: {}",last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 - 1.0 as f64/(MOUSE_RATE.lock().unwrap().clone() as f64));
+                // println!("mouserate: {:?}",MOUSE_RATE.lock().unwrap().clone());
+                let mut state = MOUSE_BUFFER.lock().unwrap();
+                *state = (0, 0);
+                unsafe {
+                    for (key, value) in &*UDPMAP {
+                        if temp_receivers.iter().any(|i| i == key) {
+                            UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
+                        }
+                    }
+                }
+                let mut instant_state = LASTMOUSEINSTANT.lock().unwrap();
+                *instant_state = Instant::now();
+            }else{
+                print!("limiting!");
+                let mut state = MOUSE_BUFFER.lock().unwrap();
+                *state = (mouse_buffer_clone.0+(buff[1] as i8) as i32, mouse_buffer_clone.1+(buff[2] as i8) as i32);
+            }   
+        }
+
+        // if event.type_ == 2 {
+
+        // }
+
+        let mut header = "".to_string();
+        if event.type_ == 1 {
+            header = "KeyboardEvent".to_string();
+        }
+        if header != "".to_string() {
+            let msg = Message {
+                sender: PEER_ID.to_string(),
+                header: header,
+                data: serde_json::to_string(&event)
+                .expect("can jsonify request"),
+                receiver: temp_receivers,
+            };
+            if let Err(e) = sender.send((msg, 1)) {
+                error!("error sending response via channel, {}", e);
+            }
+        }else{
+            //idk add all the other events?
+        }
+        
+    }
+}
+
+// fn respond_with_public_recipes(sender: mpsc::UnboundedSender<ListResponse>, receiver: String) {
+//     tokio::spawn(async move {
+//         match read_local_recipes().await {
+//             Ok(recipes) => {
+//                 let resp = ListResponse {
+//                     mode: ListMode::ALL,
+//                     receiver,
+//                     data: recipes.into_iter().filter(|r| r.public).collect(),
+//                 };
+//                 if let Err(e) = sender.send(resp) {
+//                     error!("error sending response via channel, {}", e);
+//                 }
+//             }
+//             Err(e) => error!("error fetching local recipes to answer ALL request, {}", e),
+//         }
+//     });
+// }
+
+impl NetworkBehaviourEventProcess<MdnsEvent> for RecipeBehaviour {
+    fn inject_event(&mut self, event: MdnsEvent) {
+        match event {
+            MdnsEvent::Discovered(discovered_list) => {
+                for (peer, _addr) in discovered_list {
+                    self.floodsub.add_node_to_partial_view(peer);
+                }
+            }
+            MdnsEvent::Expired(expired_list) => {
+                for (peer, _addr) in expired_list {
+                    if !self.mdns.has_node(&peer) {
+                        self.floodsub.remove_node_from_partial_view(&peer);
+                    }
+                }
+            }
+        }
+    }
+}
+struct MainStruct {
+    auto_connect: bool,
+    auto_connect_recv: String,
+    sets: Vec<Set>,
+    host: bool,
+    trusted_devices: Vec<[u8; 6]>,
+    udpmap: HashMap<String, String>,
+    device_names: HashMap<String, Device>,
+    connected_to_peers: bool,
+    published_udp: bool,
+    current_set: String,
+    subtopic: Topic,
+    keyboard_receivers: Vec<String>,
+    mouse_receivers: Vec<String>,
+    peripheral_receivers: HashMap<String, Vec<String>>,
+    terminate_threads: (Sender<bool>, Receiver<bool>),
+}
+#[tokio::main]
+async fn main() {
+    //TODO remove globals
+    // let mut main_struct = MainStruct{
+    //     auto_connect: false,
+    //     auto_connect_recv: "".to_string(),
+    //     sets: vec![],
+    //     host: true,
+    //     trusted_devices: vec![],
+    //     udpmap: HashMap::new(),
+    //     device_names: HashMap::new(),
+    //     connected_to_peers: false,
+    //     published_udp: false,
+    //     current_set: "".to_string(),
+    //     subtopic: Topic::new(""),
+    //     keyboard_receivers:  vec![],
+    //     mouse_receivers:  vec![],
+    //     peripheral_receivers: HashMap::new(),
+    //     terminate_threads: unbounded(),
+    // };
+    println!("socket {:?}", UDPSOCKET);
+    // println!("temp {:?}",131072>>16);
+    // let mouse_listener = get_mouse_recv();
+    //     thread::spawn( move || {
+    //         unsafe {set_block_mouse(true);}
+    //         receive_mouse_event();
+    // });
+    // for mouse_event_struct in mouse_listener.iter() {
+    //     println!("mouse_event_struct: pt: x: {:?},y: {:?},  scanCode: {:?}, flags: {:?}, time: {:?}, extra: {:?},",mouse_event_struct.pt.x,mouse_event_struct.pt.y, mouse_event_struct.mouseData,mouse_event_struct.flags,mouse_event_struct.time,mouse_event_struct.dwExtraInfo);
+    // }
+    pretty_env_logger::init();
+
+    info!("Peer Id: {}", PEER_ID.clone());
+    println!("Peer Id: {}", PEER_ID.clone());
+    let (response_sender, mut response_rcv) = mpsc::unbounded_channel();
+
+    let auth_keys = Keypair::<X25519Spec>::new()
+        .into_authentic(&KEYS)
+        .expect("can create auth keys");
+
+    let transp = TokioTcpConfig::new()
+        .upgrade(upgrade::Version::V1)
+        .authenticate(NoiseConfig::xx(auth_keys).into_authenticated()) // XX Handshake pattern, IX exists as well and IK - only XX currently provides interop with other libp2p impls
+        .multiplex(mplex::MplexConfig::new())
+        .boxed();
+
+    let mut behaviour = RecipeBehaviour {
+        floodsub: Floodsub::new(PEER_ID.clone()),
+        mdns: TokioMdns::new().expect("can create mdns"),
+        response_sender,
+    };
+
+    behaviour.floodsub.subscribe(TOPIC.clone());
+
+    let mut swarm = SwarmBuilder::new(transp, behaviour, PEER_ID.clone())
+        .executor(Box::new(|fut| {
+            tokio::spawn(fut);
+        }))
+        .build();
+    // let mut swarm = Swarm::new(transp, behaviour, PEER_ID.clone());
+    println!("maybe");
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+
+    Swarm::listen_on(
+        &mut swarm,
+        "/ip4/0.0.0.0/tcp/0"
+            .parse()
+            .expect("can get a local socket"),
+    )
+    .expect("swarm can be started");
+
+    init(swarm.response_sender.clone());
+
+    swarm
+        .floodsub
+        .publish(TOPIC.clone(), " ".to_string().as_bytes());
+    let startup_sender = swarm.response_sender.clone();
+    tokio::spawn(async move {
+        unsafe {
+            if let Some(trustedDevices) = loadTrustedDevices().await {
+                TRUSTEDDEVICES = trustedDevices;
+            }
+            DEVICENAMESMAP.insert(
+                PEER_ID.to_string(),
+                Device {
+                    name: whoami::devicename().to_string(),
+                    mac_addr: mac_address::get_mac_address()
+                        .unwrap()
+                        .expect("got mac addr")
+                        .bytes(),
+                    os: whoami::platform().to_string(),
+                },
+            );
+            loop {
+                if !CONNECTEDTOPEERS {
+                    println!("trying to connect....");
+                    handle_start_up(startup_sender.clone());
+                    thread::sleep(time::Duration::from_millis(5000)); //try to connect every 5 sec
+                } else {
+                    break;
+                }
+            }
+            handle_check_key(startup_sender.clone(), 0);
+            if AUTOCONNECT.lock().unwrap().len() != 0 {
+                handle_auto_connect(
+                    String::from_utf8(AUTOCONNECT.lock().unwrap().clone())
+                        .expect("Found invalid UTF-8"),
+                    startup_sender.clone(),
+                );
+                // handle_auto_connect(AUTOCONNECT.lock().unwrap().clone().to_string());
+            }
+        }
+    });
+    println!("here");
+    //UDP socket perma listener
+    
+    thread::spawn(move || {
+        loop {
+            // println!("Receiving MOUSE MOVE!");
+            let mut buf = [0; 4];
+            let (amt, src) = UDPSOCKET.recv_from(&mut buf).unwrap();
+            let buff = &mut buf[..amt];
+
+            handle_udp_mouse_input(buff);
+            //move_rel(mouse_event_struct.pt.0,mouse_event_struct.pt.1)
+        }
+    });
+    println!("here2");
+    loop {
+        let evt = {
+            tokio::select! {
+                line = stdin.next_line() => Some(EventType::Input(line.expect("can get line").expect("can read line from stdin"))),
+                event = swarm.next() => {
+                    info!("Unhandled Swarm Event: {:?}", event);
+                    None
+                },
+                response = response_rcv.recv() => Some(EventType::Response(response.expect("response exists"))),
+            }
+        };
+
+        if let Some(event) = evt {
+            // println!("event {:?}", event);
+            //Comment
+            match event {
+                EventType::Response((mut resp, topic)) => {
+                    //TODO
+                    if resp.receiver.len() == 0 {
+                        println!("public");
+                        println!("message: {:?}", resp);
+                        resp.receiver = get_all_users(&mut swarm).await
+                    } else {
+                        // println!("private")
+                    }
+                    if resp.header == "ConnectKey" {
+                        swarm
+                            .floodsub
+                            .subscribe(SUBTOPIC.lock().expect("Could not lock mutex").clone());
+                        println!(
+                            "subbed to {:?}",
+                            SUBTOPIC.lock().expect("Could not lock mutex").id()
+                        )
+                    }
+                    let json = serde_json::to_string(&resp).expect("can jsonify response");
+                    if topic == 0 {
+                        swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+                    } else if topic == 1 {
+                        // println!("subtopic {:?}", SUBTOPIC.lock().expect("Could not lock mutex"));
+                        swarm.floodsub.publish(
+                            SUBTOPIC.lock().expect("Could not lock mutex").clone(),
+                            json.as_bytes(),
+                        );
+                    } else {
+                        println!("topic error")
+                    }
+                }
+                EventType::Input(line) => match line.as_str() {
+                    "ls p" => handle_list_peers(&mut swarm).await,
+                    // cmd if cmd.starts_with("swap") => handle_swap(cmd,swarm.response_sender.clone()),
+                    cmd if cmd.starts_with("unswap") => {
+                        handle_unswap(cmd, swarm.response_sender.clone())
+                    }
+                    "test" => handle_test(),
+                    "ping" => handle_ping(&mut swarm).await,
+                    "avarage" => get_avarage(),
+                    cmd if cmd.starts_with("send test") => send_test(cmd, &mut swarm).await,
+                    "devices" => handle_list_devices(),
+                    cmd if cmd.starts_with("newset") => {
+                        handle_newset(cmd, swarm.response_sender.clone())
+                    }
+                    cmd if cmd.starts_with("newprofile") => {
+                        handle_newprofile(cmd, swarm.response_sender.clone())
+                    }
+                    "loadsets" => handle_loadsets(swarm.response_sender.clone()).await,
+                    "savesets" => handle_savesets(swarm.response_sender.clone()).await,
+                    cmd if cmd.starts_with("editprofile") => {
+                        handle_editprofile(cmd, swarm.response_sender.clone())
+                    }
+                    cmd if cmd.starts_with("startset") => {
+                        handle_startset(cmd, swarm.response_sender.clone())
+                    }
+                    cmd if cmd.starts_with("startprofile") => {
+                        handle_startprofile(cmd, swarm.response_sender.clone())
+                    }
+                    // cmd if cmd.starts_with("viewset") => handle_viewset(cmd),
+                    // cmd if cmd.starts_with("viewprofile") => handle_viewprofile(cmd),
+                    cmd if cmd.starts_with("editorder") => {
+                        handle_editorder(cmd, swarm.response_sender.clone())
+                    }
+                    cmd if cmd.starts_with("setexit") => {
+                        handle_setexit(cmd, swarm.response_sender.clone())
+                    }
+                    cmd if cmd.starts_with("setcycle") => {
+                        handle_setcycle(cmd, swarm.response_sender.clone())
+                    }
+                    cmd if cmd.starts_with("setname") => {
+                        handle_changename(cmd, swarm.response_sender.clone())
+                    }
+                    cmd if cmd.starts_with("viewsets") => handle_viewsets(),
+                    cmd if cmd.starts_with("connectdevice") => unsafe {
+                        handle_connectdevice(cmd, swarm.response_sender.clone())
+                    },
+                    cmd if cmd.starts_with("trustdevices") => unsafe {
+                        handle_trustdevice(cmd, swarm.response_sender.clone())
+                    },
+                    cmd if cmd.starts_with("mouserate") => unsafe {
+                        handle_mouserate(cmd, swarm.response_sender.clone())
+                    },
+                    "peripherals" => handle_peripherals(),
+                    "subtopic" => handle_subtopic(),
+                    _ => error!("unknown command"),
+                },
+            }
+        }
+    }
+}
+#[cfg(target_os = "windows")]
+fn handle_udp_mouse_input(buff: &mut [u8]){
+    if buff[3]
+                == (Wrapping(buff[0] as i8) + Wrapping(buff[1] as i8) + Wrapping(buff[2] as i8)).0
+                    as u8
+            {
+                if buff[0] == 1 {
+                    // move_rel((buff[1] as i8) as i32,(buff[2]as i8) as i32);
+                    send_mouse_input(
+                        MOUSEEVENTF_MOVE,
+                        0,
+                        (buff[1] as i8) as i32,
+                        (buff[2] as i8) as i32,
+                    )
+                } else {
+                    // send_mouse_input(intToMouseFlag(buff[0]),0,0,0)
+                    send_mouse_input(
+                        intToMouseFlag(buff[0]),
+                        0,
+                        (buff[1] as i8) as i32,
+                        (buff[2] as i8) as i32,
+                    )
+                }
+            } else {
+                println!("WOW THATS A SURPRISE!!!")
+            }
+}
+
+#[cfg(target_os = "linux")]
+fn handle_udp_mouse_input(buff: &mut [u8]){
+    for event in from_windows_mouse_event(buff){
+        write_to_sim_device(event);
+    }
+}
+
+fn handle_subtopic() {
+    println!(
+        "Subbed to {:?}",
+        SUBTOPIC.lock().expect("Could not lock mutex").id()
+    );
+}
+
+fn handle_list_devices() {
+    unsafe {
+        println!("Devices: {:?}", DEVICENAMESMAP);
+    }
+}
+
+fn handle_start_up(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    unsafe {
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "Connect".to_string(),
+            data: serde_json::to_string(&DEVICENAMESMAP.get(&PEER_ID.clone().to_string()))
+                .expect("can jsonify request"),
+            receiver: vec![],
+        };
+        // println!("msg {:?}",msg);
+        // let json = serde_json::to_string(&msg).expect("can jsonify request");
+        // swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+        sender.send((msg, 0)).expect("sent msg");
+    }
+}
+
+unsafe fn handle_connectdevice(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("connectdevice") {
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "AttemptConnectSubTopic".to_string(),
+            data: serde_json::to_string(&(
+                DEVICENAMESMAP.get(&PEER_ID.clone().to_string()),
+                rest.to_owned().trim(),
+            ))
+            .expect("can jsonify request"),
+            receiver: vec![],
+        };
+        // println!("msg {:?}",msg);
+        // let json = serde_json::to_string(&msg).expect("can jsonify request");
+        // swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+        sender.send((msg, 0)).expect("sent msg");
+    }
+}
+
+fn handle_check_key(sender: mpsc::UnboundedSender<(Message, i32)>, offset: usize) {
+    let msg = Message {
+        sender: PEER_ID.to_string(),
+        header: "ConnectKey".to_string(),
+        data: (&PEER_ID.to_string()[PEER_ID.to_string().to_string().len() - offset - KEYLENGTH
+            ..PEER_ID.to_string().to_string().len() - offset])
+            .to_owned(),
+        receiver: vec![],
+    };
+    let mut state = SUBTOPIC.lock().expect("Could not lock mutex");
+    *state = Topic::new(
+        (&PEER_ID.to_string()[PEER_ID.to_string().to_string().len() - offset - KEYLENGTH
+            ..PEER_ID.to_string().to_string().len() - offset])
+            .to_owned(),
+    );
+    // behaviour.floodsub.subscribe(TOPIC.clone());
+    // println!("msg {:?}",msg);
+    // let json = serde_json::to_string(&msg).expect("can jsonify request");
+    // swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+    sender.send((msg, 0)).expect("sent msg");
+}
+
+fn publishUDPSocket(sender: mpsc::UnboundedSender<(Message, i32)>, peer_id: String) {
+    println!("Local Addr: {}", UDPSOCKET.local_addr().unwrap());
+    let msg = Message {
+        sender: PEER_ID.to_string(),
+        header: "PublishUDP".to_string(),
+        data: UDPSOCKET.local_addr().unwrap().to_string(),
+        receiver: vec![peer_id],
+    };
+    sender.send((msg, 0)).expect("sent msg");
+}
+fn get_avarage() {
+    unsafe {
+        let mut sum1 = 0;
+        for f in &KEYBOARDAVARAGE {
+            sum1 += f;
+        }
+        println!("keyboard avarage {},", sum1 / KEYBOARDAVARAGE.len() as i64);
+        let mut sum2 = 0;
+        for f in &MOUSEAVARAGE {
+            sum2 += f;
+        }
+        println!("keyboard avarage {},", sum2 / MOUSEAVARAGE.len() as i64);
+    }
+}
+
+async fn handle_ping(swarm: &mut Swarm<RecipeBehaviour>) {
+    let dt = chrono::prelude::Local::now();
+    let milliseconds: i64 = dt.timestamp_millis();
+    let msg = Message {
+        sender: PEER_ID.to_string(),
+        header: "Ping".to_string(),
+        data: milliseconds.to_string(),
+        receiver: get_all_users(swarm).await,
+    };
+    let json = serde_json::to_string(&msg).expect("can jsonify request");
+    swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+}
+
+fn handle_terminate(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    println!("unswappping......");
+    println!("unswappping......");
+    println!("unswappping......");
+    let mut temp_string = " ".to_string();
+    unsafe {
+        for (k,v) in PERIPHERAL_RECEIVERS.lock().unwrap().iter() {
+            temp_string += &k.clone();
+            temp_string += " ";
+        }
+    }
+    handle_unswap(&("unswap".to_string() + &temp_string), sender.clone());
+}
+
+fn reset_peripheral_receivers(){
+    addDevices();
+}
+
+fn handle_cycle(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    let set = CURRENTSET.lock().expect("Could not lock mutex").clone();
+    reset_peripheral_receivers();
+    if set != "" {
+        println!("cycling....");
+        Set::cycleProfiles(
+            CURRENTSET.lock().expect("Could not lock mutex").clone(),
+            sender.clone(),
+        );
+    }
+}
+
+
+fn set_currentset(newset: String) {
+    println!("here??? in currentset");
+    let mut state = CURRENTSET.lock().unwrap();
+    *state = newset;
+    println!("here!!! in currentset");
+}
+
+
+#[cfg(target_os = "windows")]
+fn set_keyboard_block(state: bool) {
+    unsafe {
+        set_block_keyboard(state);
+    }
+}
+
+
+#[cfg(target_os = "windows")]
+fn edit_peripheral_receivers(peripheral: String,recivers: Vec<String>) {
+    // KEYBOARD_RECEIVERS = Mutex::new(recivers);
+    // let mut state = KEYBOARD_RECEIVERS.lock().expect("Could not lock mutex");
+    // *state = recivers;
+    match peripheral.as_str(){
+        "mouse" => {PERIPHERAL_RECEIVERS
+            .lock()
+            .expect("Failed to unlock Mutex")
+            .insert("mouse".to_string(), recivers);
+        },
+        "keyboard" => {
+            PERIPHERAL_RECEIVERS
+            .lock()
+            .expect("Failed to unlock Mutex")
+            .insert("keyboard".to_string(), recivers);
+        },
+        _ =>()
+    }
+    
+}
+
+#[cfg(target_os = "linux")]
+fn edit_peripheral_receivers(peripheral: String,recivers: Vec<String>) {
+    PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .insert(peripheral.clone(), recivers);
+}
+
+// #[cfg(target_os = "windows")]
+// fn set_mouse_recivers(recivers: Vec<String>) {
+//     // let mut state = MOUSE_RECEIVERS.lock().expect("Could not lock mutex");
+//     // *state = recivers;
+//     PERIPHERAL_RECEIVERS
+//         .lock()
+//         .expect("Failed to unlock Mutex")
+//         .insert("mouse".to_string(), recivers);
+// }
+
+//windows
+#[cfg(target_os = "windows")]
+fn set_peripheral_block(peripheral: String,blocking:bool) {
+    match peripheral.as_str(){
+        "mouse" => set_mouse_block(blocking),
+        "keyboard" => set_keyboard_block(blocking),
+        _ =>()
+    }
+}
+
+
+#[cfg(target_os = "linux")]
+fn set_peripheral_block(peripheral: String,blocking:bool) {
+    println!("calling block with {}", blocking);
+    let blockingsender = get_peripheral_blocker_with_id(peripheral.clone());
+    blockingsender.clone().send(blocking).unwrap();
+}
+
+#[cfg(target_os = "windows")]
+fn set_mouse_block(state: bool) {
+    unsafe {
+        set_block_mouse(state);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn handle_keyboard_event(
+    mut key_event_struct: KeyboardEvent,
+    sender: mpsc::UnboundedSender<(Message, i32)>,
+) {
+    let temp_receivers = PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .get(&"keyboard".to_string())
+        .unwrap()
+        .clone();
+
+    if temp_receivers.len() != 0 {
+        // println!("Sending keuboard event to :{:?}!", temp_receivers);
+        let dt = chrono::prelude::Local::now();
+        let milliseconds: i64 = dt.timestamp_millis();
+        key_event_struct.time = milliseconds;
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "KeyboardEvent".to_string(),
+            data: serde_json::to_string(&key_event_struct)
+            .expect("can jsonify request"),
+            receiver: temp_receivers,
+        };
+        if let Err(e) = sender.send((msg, 1)) {
+            error!("error sending response via channel, {}", e);
+        }
+    }
+    // if receivers.len() != 0 {
+    //     let dt = chrono::prelude::Local::now();
+    //     let milliseconds: i64 = dt.timestamp_millis();
+    //     let msg = Message {
+    //         sender: PEER_ID.to_string(),
+    //         header: "KeyboardEvent".to_string(),
+    //         data: serde_json::to_string(&KeyboardEvent {
+    //             vkCode: key_event_struct.vkCode,
+    //             scanCode: key_event_struct.scanCode,
+    //             flags: key_event_struct.flags,
+    //             time: milliseconds,
+    //         })
+    //         .expect("can jsonify request"),
+    //         receiver: receivers,
+    //     };
+    //     if let Err(e) = sender.send((msg, 1)) {
+    //         error!("error sending response via channel, {}", e);
+    //     }
+    // }
+}
+
+#[cfg(target_os = "windows")]
+fn handle_mouse_event(
+    mut mouse_event_struct: MouseEvent,
+    sender: mpsc::UnboundedSender<(Message, i32)>,
+) {
+    let recivers = PERIPHERAL_RECEIVERS
+        .lock()
+        .expect("Failed to unlock Mutex")
+        .get(&"mouse".to_string())
+        .unwrap()
+        .clone();
+    if recivers.len() != 0 {
+        let intType = mouseFlagToInt(mouse_event_struct.flags);
+        if mouse_event_struct.flags == 0 {
+            let mouse_buffer_clone = MOUSE_BUFFER.lock().unwrap().clone();
+            let mut buff: [u8; 4] = [0; 4];
+            buff[0] = 1 as u8;
+            buff[1] = (mouse_event_struct.pt.0 as i8) as u8;
+            buff[2] = (mouse_event_struct.pt.1 as i8) as u8;
+            buff[3] = (Wrapping(buff[0] as i8) + Wrapping(buff[1] as i8) + Wrapping(buff[2] as i8))
+                .0 as u8;
+
+            let last_instant = LASTMOUSEINSTANT.lock().unwrap().elapsed();
+            let mouse_rate = MOUSE_RATE.lock().unwrap().clone() as f64;
+            if last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 > 1.0 as f64/mouse_rate{
+                println!("diff: {}",last_instant.as_secs() as f64 +  last_instant.subsec_nanos() as f64 * 1e-9 - 1.0 as f64/mouse_rate);
+                println!("mouserate: {:?}",mouse_rate);
+                let mut state = MOUSE_BUFFER.lock().unwrap();
+                *state = (0, 0);
+                unsafe {
+                    for (key, value) in &*UDPMAP {
+                        if recivers.iter().any(|i| i == key) {
+                            UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
+                        }
+                    }
+                }
+                let mut instant_state = LASTMOUSEINSTANT.lock().unwrap();
+                *instant_state = Instant::now();
+            }else{
+                let mut state = MOUSE_BUFFER.lock().unwrap();
+                *state = (mouse_buffer_clone.0+(buff[1] as i8) as i32, mouse_buffer_clone.1+(buff[2] as i8) as i32);
+            }
+            
+        } else if intType != 0 {
+            let mut buff: [u8; 4] = [0; 4];
+            buff[0] = intType;
+            buff[1] = 0;
+            buff[2] = 0;
+            buff[3] = intType;
+            unsafe {
+                for (key, value) in &*UDPMAP {
+                    // println!("Sending mouse btn");
+                    if recivers.iter().any(|i| i == key) {
+                        UDPSOCKET.send_to(&buff, &value.clone()).unwrap();
+                    }
+                }
+            }
+        } else {
+            let dt = chrono::prelude::Local::now();
+            let milliseconds: i64 = dt.timestamp_millis();
+            mouse_event_struct.time = milliseconds;
+            let msg = Message {
+                sender: PEER_ID.to_string(),
+                header: "MouseEvent".to_string(),
+                data: serde_json::to_string(&mouse_event_struct).expect("can jsonify request"),
+                receiver: recivers,
+            };
+            println!("Sending mouse sidebtn");
+            if let Err(e) = sender.send((msg, 0)) {
+                error!("error sending response via channel, {}", e);
+            }
+        }
+    }
+}
+
+
+#[cfg(target_os = "windows")]
+fn mouseFlagToInt(flag: DWORD) -> u8 {
+    return match flag {
+        MOUSEEVENTF_LEFTDOWN => 2,
+        MOUSEEVENTF_RIGHTDOWN => 3,
+        MOUSEEVENTF_MIDDLEDOWN => 4,
+        MOUSEEVENTF_LEFTUP => 5,
+        MOUSEEVENTF_RIGHTUP => 6,
+        MOUSEEVENTF_MIDDLEUP => 7,
+        _ => 0,
+    };
+}
+#[cfg(target_os = "windows")]
+fn intToMouseFlag(flag: u8) -> DWORD {
+    return match flag {
+        2 => MOUSEEVENTF_LEFTDOWN,
+        3 => MOUSEEVENTF_RIGHTDOWN,
+        4 => MOUSEEVENTF_MIDDLEDOWN,
+        5 => MOUSEEVENTF_LEFTUP,
+        6 => MOUSEEVENTF_RIGHTUP,
+        7 => MOUSEEVENTF_MIDDLEUP,
+        _ => 0,
+    };
+}
+#[cfg(target_os = "windows")]
+fn unswap(rest: String) {
+    let elements: Vec<&str> = rest.split(" ").collect();
+    for f in &elements {
+        match f {
+            &"mouse" => {
+                set_peripheral_block("mouse".to_string(), false);
+                // set_mouse_recivers(vec![]);
+                edit_peripheral_receivers("mouse".to_string(), vec![]);
+            }
+            &"keyboard" => {
+                set_peripheral_block("keyboard".to_string(), false);
+                // set_keyboard_recivers(vec![]);
+                edit_peripheral_receivers("keyboard".to_string(), vec![]);
+            }
+            invalid => {
+                println!("Invalid item to swap: {}", invalid)
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn unswap(rest: String) {
+    let elements: Vec<&str> = rest.split(" ").collect();
+    for f in &elements {
+        match f {
+            &"" => (),
+            &" " => (),
+            id => {
+                set_peripheral_block(id.clone().to_string(), false);
+                // set_keyboard_recivers(vec![]);
+                edit_peripheral_receivers(id.clone().to_string(), vec![]);
+            }
+        }
+    }
+}
+
+fn handle_unswap(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("unswap") {
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "Unswap".to_string(),
+            data: rest.to_owned(),
+            receiver: vec![],
+        };
+        if let Err(e) = sender.send((msg, 0)) {
+            error!("error sending response via channel, {}", e);
+        } else {
+            unswap(rest.to_owned());
+        }
+    }
+}
+
+// fn handle_swap(cmd: &str ,sender: mpsc::UnboundedSender<(Message, i32)>) {
+//     // thread::spawn(move || {
+//     //     receive_keyboard_event();
+//     // });
+//     // receive_mouse_event();
+//     // let msg = Message {
+//     //     header: "KeyboardEvent".to_string(),
+//     //     data: "lolol".to_string(),
+//     //     receiver: vec![],
+//     // };
+//     // if let Err(e) = sender.clone().send((msg,0)) {
+//     //     error!("error sending response via channel, {}", e);
+//     // }
+//     if let Some(rest) = cmd.strip_prefix("swap") {
+//         let elements: Vec<&str> = rest.split(" ").collect();
+//         for f in &elements {
+//            match f {
+//             &"mouse" => {
+//                 swap_mouse(sender.clone())
+//             },
+//             &"keyboard" => {
+//                 swap_keyboard(sender.clone())
+//             },
+//             invalid =>{
+//                 println!("Invalid item to swap: {}", invalid)
+//             }
+//            }
+//         }
+//     }
+// }
+async fn handle_list_peers(swarm: &mut Swarm<RecipeBehaviour>) {
+    let nodes = swarm.mdns.discovered_nodes();
+    let mut unique_peers = HashSet::new();
+    for peer in nodes {
+        unique_peers.insert(peer);
+    }
+    unique_peers.iter().for_each(|p| info!("{}", p));
+    unique_peers.iter().for_each(|p| println!("{}", p));
+}
+
+async fn get_all_users(swarm: &mut Swarm<RecipeBehaviour>) -> Vec<String> {
+    let nodes = swarm.mdns.discovered_nodes();
+    let mut array: Vec<String> = Vec::new();
+    for peer in nodes {
+        if !array.contains(&peer.to_string()) {
+            array.push(peer.to_string());
+        }
+    }
+    array
+}
+
+async fn send_test(cmd: &str, swarm: &mut Swarm<RecipeBehaviour>) {
+    let sender = swarm.response_sender.clone();
+    if let Some(rest) = cmd.strip_prefix("send test") {
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "Test".to_string(),
+            data: rest.to_string(),
+            receiver: get_all_users(swarm).await,
+        };
+        let json = serde_json::to_string(&msg).expect("can jsonify request");
+        swarm.floodsub.publish(TOPIC.clone(), json.as_bytes());
+    }
+}
+
+fn handle_newset(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("newset") {
+        if Set::new(rest.trim().to_owned(), sender.clone()) {
+            println!("success!");
+            return;
+        }
+    }
+    println!("failure to create new set!");
+}
+fn handle_newprofile(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("newprofile") {
+        let elements: Vec<&str> = rest.trim().split(" ").collect();
+        if Set::newProfile(
+            elements[0].trim().to_owned(),
+            elements[1].trim().to_owned(),
+            sender.clone(),
+        ) {
+            println!("success!");
+            return;
+        }
+    }
+    println!("failure to create new set!");
+}
+
+fn handle_editprofile(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("editprofile") {
+        let elements: Vec<&str> = rest.trim().split(" ").collect();
+        let mut receivers = vec![];
+        let mut sender_id = elements[3].trim().to_owned();
+        match searchDeviceName(elements[3].trim().to_owned()).as_str() {
+            "" => (),
+            a => sender_id = a.to_owned(),
+        };
+        for i in 4..elements.len() {
+            match searchDeviceName(elements[i].trim().to_owned()).as_str() {
+                "" => receivers.push(elements[i].trim().to_owned()),
+                a => receivers.push(a.to_owned()),
+            };
+        }
+        println!("{:?}  {:?}  {:?}  {:?}  {:?}  ",elements[0].trim().to_owned(),
+        elements[1].trim().to_owned(),
+        elements[2].trim().to_owned(),
+        sender_id,
+        receivers);
+        Set::editProfile(
+            elements[0].trim().to_owned(),
+            elements[1].trim().to_owned(),
+            elements[2].trim().to_owned(),
+            sender_id,
+            receivers,
+            sender.clone(),
+        )
+    }
+}
+
+fn handle_changename(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("setname") {
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "ChangeName".to_string(),
+            data: serde_json::to_string(&Device {
+                name: rest.trim().to_owned(),
+                mac_addr: mac_address::get_mac_address()
+                    .unwrap()
+                    .expect("got mac addr")
+                    .bytes(),
+                os: whoami::platform().to_string(),
+            })
+            .expect("can jsonify request"),
+            receiver: vec![],
+        };
+        if let Err(e) = sender.send((msg, 0)) {
+            error!("error sending response via channel, {}", e);
+        } else {
+            unsafe {
+                DEVICENAMESMAP.insert(
+                    PEER_ID.clone().to_string(),
+                    Device {
+                        name: rest.trim().to_owned(),
+                        mac_addr: mac_address::get_mac_address()
+                            .unwrap()
+                            .expect("got mac addr")
+                            .bytes(),
+                        os: whoami::platform().to_string(),
+                    },
+                );
+            };
+        }
+    }
+}
+
+fn handle_startset(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    updateSet(sender.clone());
+    if let Some(rest) = cmd.strip_prefix("startset") {
+        let elements: Vec<&str> = rest.trim().split(" ").collect();
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "StartSet".to_string(),
+            data: serde_json::to_string(&StartMessage {
+                set: elements[0].to_owned(),
+                profile: Set::getfirstprofile(elements[0].to_owned()),
+            })
+            .expect("can jsonify request"),
+            receiver: vec![],
+        };
+        if let Err(e) = sender.clone().send((msg, 0)) {
+            error!("error sending response via channel, {}", e);
+        } else {
+            println!("starting local????");
+            let set_id = elements[0].to_owned();
+            thread::spawn(move || {
+                Set::startSet(set_id, sender.clone());
+            });
+        }
+    }
+}
+
+fn handle_startprofile(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    updateSet(sender.clone());
+    if let Some(rest) = cmd.strip_prefix("startprofile") {
+        let elements: Vec<&str> = rest.trim().split(" ").collect();
+        let msg = Message {
+            sender: PEER_ID.to_string(),
+            header: "StartSet".to_string(),
+            data: serde_json::to_string(&StartMessage {
+                set: elements[0].to_owned(),
+                profile: elements[1].to_owned(),
+            })
+            .expect("can jsonify request"),
+            receiver: vec![],
+        };
+        if let Err(e) = sender.send((msg, 0)) {
+            error!("error sending response via channel, {}", e);
+        } else {
+            //TODO i think this is blocking :/
+            Set::startProfile(
+                elements[0].to_owned(),
+                elements[1].to_owned(),
+                sender.clone(),
+            )
+        }
+    }
+}
+
+async fn handle_loadsets(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    let loadedset = from_save_sets(Set::loadFromDefaultFile().await);
+    println!("loadedset: {:?}", loadedset);
+    if loadedset.len() != 0 {
+        unsafe { SETS = loadedset }
+        updateSet(sender.clone());
+    }
+}
+
+async fn handle_savesets(sender: mpsc::UnboundedSender<(Message, i32)>) {
+    Set::saveToDefaultFile().await;
+    println!("saved!");
+}
+
+fn handle_viewsets() {
+    unsafe {
+        println!("SETS {:?}", SETS);
+    }
+}
+fn handle_setexit(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("setexit") {
+        let elements: Vec<&str> = rest.trim().split(" ").collect();
+        Set::setexit(
+            elements[0].to_owned(),
+            elements[1..]
+                .to_vec()
+                .iter()
+                .map(|x| (*x).to_owned().parse::<u32>().unwrap())
+                .collect(),
+            sender.clone(),
+        );
+    }
+}
+fn handle_setcycle(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("setcycle") {
+        let elements: Vec<&str> = rest.trim().split(" ").collect();
+        Set::setcycle(
+            elements[0].to_owned(),
+            elements[1..]
+                .to_vec()
+                .iter()
+                .map(|x| (*x).to_owned().parse::<u32>().unwrap())
+                .collect(),
+            sender.clone(),
+        );
+    }
+}
+fn handle_editorder(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    //TODO
+    if let Some(rest) = cmd.strip_prefix("editorder") {
+        let elements: Vec<&str> = rest.trim().split(" ").collect();
+        Set::editorder(
+            elements[0].to_owned(),
+            elements[1..]
+                .to_vec()
+                .iter()
+                .map(|x| (*x).to_owned())
+                .collect(),
+            sender.clone(),
+        );
+    }
+}
+
+fn handle_trustdevice(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("trustdevices") {
+        let mut elements: Vec<&str> = rest.trim().split(",").collect();
+        println!("elements {:?}", elements);
+        unsafe {
+            let name = DEVICENAMESMAP
+                .get(&PEER_ID.clone().to_string())
+                .unwrap()
+                .name
+                .clone();
+            elements.push(&name);
+
+            for devicename in &elements {
+                if searchDeviceName(devicename.trim().to_string()) != "".to_string() {
+                    let device = DEVICENAMESMAP.get(&searchDeviceName(devicename.trim().to_string())).unwrap();
+                    if !TRUSTEDDEVICES.contains(&device.mac_addr) {
+                        TRUSTEDDEVICES.push(device.mac_addr.clone());
+                    }
+                }else{
+                    println!("bruh.... {:?}  {:?}",devicename, devicename.trim());
+                }
+                
+            }
+            let msg = Message {
+                sender: PEER_ID.to_string(),
+                header: "TrustedDevices".to_string(),
+                data: serde_json::to_string(&TRUSTEDDEVICES).expect("can jsonify request"),
+                receiver: vec![],
+            };
+            if let Err(e) = sender.send((msg, 1)) {
+                error!("error sending response via channel, {}", e);
+            } else {
+                tokio::spawn(async move {
+                    writeTrustedDevices(TRUSTEDDEVICES.clone()).await;
+                });
+            }
+        }
+    }
+}
+
+fn handle_test(){
+    println!("PERIPHERAL_RECEIVERS {:?}", PERIPHERAL_RECEIVERS.lock().expect("Could not lock mutex"));
+}
+
+#[cfg(target_os = "windows")]
+fn handle_peripherals(){
+    println!("mouse");
+    println!("keyboard");
+}
+
+
+#[cfg(target_os = "linux")]
+fn handle_peripherals(){
+    for device in get_linux_devices(){
+        println!("id: {:?} name:{:?}", device.id, device.name);
+    }
+}
+
+fn handle_mouserate(cmd: &str, sender: mpsc::UnboundedSender<(Message, i32)>) {
+    if let Some(rest) = cmd.strip_prefix("mouserate") {
+        let newrate = rest.trim().to_owned().parse::<i32>().unwrap();
+        let mut state = MOUSE_RATE.lock().unwrap();
+        *state = newrate;
+    }
+}
