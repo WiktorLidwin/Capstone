@@ -39,7 +39,7 @@ while True:
     if not devices_window_active and event == '_LOGIN_' and login:
         main_window.Hide()
         devices_window_active = True
-
+        
         devices_layout = [
             [sg.Button('', key='_HOME_', button_color=(sg.theme_background_color(),sg.theme_background_color()),
                        image_filename=image_home, image_size=(50, 60), image_subsample=10, border_width=0), sg.Text('Devices', key='DEVICES', font='Ubuntu 35')],
@@ -48,6 +48,7 @@ while True:
         # New window after login
         devices_window = sg.Window('LightSwitch::' + platform + "::devices", devices_layout, size=(600, 400), element_justification='c')
         num_buttons = 0
+        MAX_BUTTONS = 3
         while True:
             event, values = devices_window.Read()
             if event in ('_HOME_', None):
@@ -56,7 +57,7 @@ while True:
                 main_window.UnHide()
                 break
             if event == '_ADD_':
-                if num_buttons < 3:
+                if num_buttons < MAX_BUTTONS:
                     num_buttons+=1
                 devices_layout_1 = [
                     [sg.Button('', key='_HOME_', button_color=(sg.theme_background_color(),sg.theme_background_color()),
