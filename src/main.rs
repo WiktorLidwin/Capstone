@@ -833,6 +833,10 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for RecipeBehaviour {
                             handle_ChangeName(resp);
                         }else if resp.header == "Kick" {
                             handle_Kick(resp,&mut self.floodsub);
+                        }else if resp.header == "AttemptConnectFromSubTopic" {
+                            handle_AttemptConnectFromSubTopic(resp,self.response_sender.clone(), &mut self.floodsub);
+                        }else if resp.header == "ConnectFromSubTopic" {
+                            handle_ConnectFromSubTopic(resp,self.response_sender.clone(), &mut self.floodsub);
                         }
                         // resp.data.iter().for_each(|r| info!("{:?}", r));
                     }
@@ -1216,7 +1220,7 @@ fn handle_AttemptConnectSubTopic(resp: Message, sender: mpsc::UnboundedSender<(M
                     header: "ConnectSubTopic".to_string(),
                     data: serde_json::to_string(&(
                         DEVICENAMESMAP.get(&PEER_ID.clone().to_string()),
-                        id,
+                        SUBTOPIC.lock().expect("Could not lock mutex").id(),
                     ))
                     .expect("can jsonify request"),
                     receiver: vec![resp.sender.clone()],
@@ -2104,7 +2108,7 @@ unsafe fn handle_connectfrom(cmd: &str, sender: mpsc::UnboundedSender<(Message, 
             data: serde_json::to_string(&(
                 DEVICENAMESMAP.get(&PEER_ID.clone().to_string()),
                 rest.to_owned().trim(),
-                DEVICEID.lock().expect("Could not lock mutex").clone()
+                SUBTOPIC.lock().expect("Could not lock mutex").id().clone()
             ))
             .expect("can jsonify request"),
             receiver: vec![],
